@@ -1,26 +1,41 @@
 {
-  "name": "temp-app",
+  "name": "ai-ecommerce-support-agent",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed:sheets": "npx tsx scripts/seed-sheets.ts",
+    "generate:policy": "npx tsx scripts/generate-policy-doc.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.30.0",
+    "canvas-confetti": "^1.9.4",
+    "clsx": "^2.1.1",
+    "docx": "^9.13.0",
+    "dotenv": "^18.0.8",
+    "googleapis": "^187.0.0",
+    "lucide-react": "^1.61.0",
+    "mammoth": "^1.13.0",
     "next": "16.4.2",
+    "nodemailer": "^10.2.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
+    "@types/canvas-confetti": "^1.9.0",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   }
 }
