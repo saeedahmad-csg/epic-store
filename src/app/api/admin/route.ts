@@ -9,9 +9,13 @@ import {
 import { getCompanyPolicies } from "@/lib/policies";
 import { runtimeSettings } from "@/lib/gemini";
 import { getDispatchedEmails } from "@/lib/email";
+import { requireAdminKey } from "@/lib/adminAuth";
 
-export async function GET() {
+export async function GET(req?: NextRequest) {
   try {
+    const authError = requireAdminKey(req);
+    if (authError) return authError;
+
     const [sheetsStatus, policies, refunds, interactions, emails, products] = await Promise.all([
       checkGoogleSheetsConnection(),
       getCompanyPolicies(),
@@ -35,13 +39,19 @@ export async function GET() {
       productsCount: products.length,
     });
   } catch (err: any) {
-    console.error("Error in /api/admin GET:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Error in /api/admin GET:", err?.message || err);
+    return NextResponse.json(
+      { error: "An internal server error occurred in admin operations." },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const authError = requireAdminKey(req);
+    if (authError) return authError;
+
     const body = await req.json();
     const { action, autoApprove } = body;
 
@@ -61,6 +71,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid action." }, { status: 400 });
   } catch (err: any) {
     console.error("Error in /api/admin POST:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "An internal server error occurred in admin operations." },
+      { status: 500 }
+    );
   }
 }

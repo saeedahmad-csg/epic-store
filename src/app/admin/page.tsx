@@ -14,28 +14,34 @@ import {
   Upload,
   ExternalLink,
   ArrowLeft,
-  Sparkles,
-  Sliders,
-  Send,
-  Eye,
-  AlertTriangle,
   Receipt,
   MessageSquare,
-  Check,
   Search,
-  Zap,
-  BookOpen,
+  Sliders,
+  Lock,
+  LogOut,
+  User,
+  Key,
 } from "lucide-react";
 import confetti from "canvas-confetti";
 import { RefundRequest, InteractionLog } from "@/lib/sampleData";
 import { SentEmailRecord } from "@/lib/email";
 
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<"refunds" | "sheets" | "policy" | "emails" | "interactions">("refunds");
+  // Authentication states
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  // Tab & Data states
+  const [activeTab, setActiveTab] = useState<"refunds" | "interactions" | "settings">("refunds");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Data states
+  // Store data states
   const [googleSheetsInfo, setGoogleSheetsInfo] = useState<any>(null);
   const [policyInfo, setPolicyInfo] = useState<any>(null);
   const [autoApprove, setAutoApprove] = useState(false);
@@ -43,54 +49,91 @@ export default function AdminPage() {
   const [emails, setEmails] = useState<SentEmailRecord[]>([]);
   const [interactions, setInteractions] = useState<InteractionLog[]>([]);
 
-  // Clause-Level RAG Explorer state
-  const [ragQuery, setRagQuery] = useState("Can I return opened earbuds?");
-  const [ragSearching, setRagSearching] = useState(false);
-  const [ragResults, setRagResults] = useState<any[]>([]);
-
-  // Modals & Messages
-  const [selectedEmail, setSelectedEmail] = useState<SentEmailRecord | null>(null);
+  // Modals & Feedback
   const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+  const [actionErrorMsg, setActionErrorMsg] = useState<string | null>(null);
   const [uploadingPolicy, setUploadingPolicy] = useState(false);
   const [seedingSheets, setSeedingSheets] = useState(false);
-  const [autoSyncInterval, setAutoSyncInterval] = useState<number>(3); // 3 seconds minimum real-time sync
-  const [lastSyncedTime, setLastSyncedTime] = useState<Date>(new Date());
-  const [syncCount, setSyncCount] = useState<number>(0);
+  const [processingRefundId, setProcessingRefundId] = useState<string | null>(null);
+  const [lastSyncedTime, setLastSyncedTime] = useState<Date | null>(null);
+  const [inquirySearch, setInquirySearch] = useState("");
 
+  // Check existing session on mount
   useEffect(() => {
-    loadAdminData(false);
-    handleTestRAG("Can I return opened earbuds?");
+    if (typeof window !== "undefined") {
+      const isAuth = sessionStorage.getItem("apexstore_admin_authenticated") === "true";
+      setIsAuthenticated(isAuth);
+      setAuthChecking(false);
+      setLastSyncedTime(new Date());
+
+      if (isAuth) {
+        loadAdminData(false);
+      }
+    }
   }, []);
 
-  // Background Auto-Sync Interval (Defaults to 3s minimum for live Google Sheets updates)
-  useEffect(() => {
-    if (autoSyncInterval <= 0) return;
-    const timer = setInterval(() => {
-      loadAdminData(true);
-    }, autoSyncInterval * 1000);
-    return () => clearInterval(timer);
-  }, [autoSyncInterval]);
+  function getAuthHeaders(): HeadersInit {
+    if (typeof window === "undefined") return {};
+    const savedKey = sessionStorage.getItem("apexstore_admin_key") || "";
+    return savedKey ? { "x-admin-key": savedKey } : {};
+  }
 
-  async function handleTestRAG(queryToTest?: string) {
-    const q = queryToTest ?? ragQuery;
-    if (!q.trim()) return;
-    setRagSearching(true);
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setLoginError(null);
+    setLoggingIn(true);
+
     try {
-      const res = await fetch(`/api/policy?q=${encodeURIComponent(q.trim())}`);
+      const res = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: loginEmail.trim(),
+          password: loginPassword.trim(),
+        }),
+      });
+
       const data = await res.json();
-      setRagResults(data.retrievedClauses || []);
+
+      if (!res.ok || data.error) {
+        setLoginError(data.error || "Invalid email or password. Please try again.");
+        return;
+      }
+
+      sessionStorage.setItem("apexstore_admin_authenticated", "true");
+      sessionStorage.setItem("apexstore_admin_key", data.token || loginPassword.trim());
+      setIsAuthenticated(true);
+      await loadAdminData(false);
     } catch (err) {
-      console.error("Failed to query policy RAG:", err);
+      setLoginError("An error occurred during authentication. Please retry.");
     } finally {
-      setRagSearching(false);
+      setLoggingIn(false);
     }
+  }
+
+  function handleSignOut() {
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem("apexstore_admin_authenticated");
+      sessionStorage.removeItem("apexstore_admin_key");
+    }
+    setIsAuthenticated(false);
+    setLoginEmail("");
+    setLoginPassword("");
   }
 
   async function loadAdminData(silent = false) {
     if (!silent) setRefreshing(true);
     try {
-      const res = await fetch("/api/admin");
+      const res = await fetch("/api/admin", {
+        headers: getAuthHeaders(),
+      });
       const data = await res.json();
+
+      if (res.status === 401) {
+        handleSignOut();
+        setLoginError("Session expired or invalid key. Please log in again.");
+        return;
+      }
 
       setGoogleSheetsInfo(data.googleSheets);
       setPolicyInfo(data.policies);
@@ -99,9 +142,9 @@ export default function AdminPage() {
       setEmails(data.emails || []);
       setInteractions(data.interactions || []);
       setLastSyncedTime(new Date());
-      setSyncCount((prev) => prev + 1);
     } catch (err) {
       console.error("Failed to load admin data:", err);
+      showError("Failed to synchronize with server.");
     } finally {
       setLoading(false);
       if (!silent) setRefreshing(false);
@@ -112,22 +155,29 @@ export default function AdminPage() {
     const nextVal = !autoApprove;
     setAutoApprove(nextVal);
     try {
-      await fetch("/api/admin", {
+      const res = await fetch("/api/admin", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ action: "toggle_auto_approve", autoApprove: nextVal }),
       });
-      showSuccess(`Auto-Approve toggled: ${nextVal ? "ENABLED (Instant Approval)" : "DISABLED (Human-in-the-Loop Review)"}`);
-    } catch (err) {
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "Failed to toggle setting");
+      }
+      showSuccess(`Auto-Approve: ${nextVal ? "ENABLED (Instant Approval)" : "DISABLED (Manual Review)"}`);
+    } catch (err: any) {
       console.error("Failed to toggle auto approve:", err);
+      showError(err.message || "Failed to toggle auto-approve.");
+      setAutoApprove(!nextVal);
     }
   }
 
   async function handleRefundAction(refundId: string, action: "APPROVE" | "REJECT") {
+    setProcessingRefundId(refundId);
     try {
       const res = await fetch("/api/refunds", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ refundId, action }),
       });
 
@@ -138,18 +188,20 @@ export default function AdminPage() {
 
       if (action === "APPROVE") {
         confetti({
-          particleCount: 80,
+          particleCount: 70,
           spread: 60,
           origin: { y: 0.6 },
         });
-        showSuccess(`Refund ${refundId} APPROVED! Automated confirmation email dispatched.`);
+        showSuccess(`Refund ${refundId} approved and confirmation email sent.`);
       } else {
-        showSuccess(`Refund ${refundId} REJECTED.`);
+        showSuccess(`Refund ${refundId} rejected.`);
       }
 
-      await loadAdminData();
+      await loadAdminData(true);
     } catch (err: any) {
-      alert(`Error: ${err.message}`);
+      showError(err.message || `Failed to ${action.toLowerCase()} refund.`);
+    } finally {
+      setProcessingRefundId(null);
     }
   }
 
@@ -158,14 +210,17 @@ export default function AdminPage() {
     try {
       const res = await fetch("/api/admin", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify({ action: "seed_sheets" }),
       });
       const data = await res.json();
-      showSuccess(data.message || "Google Sheets seeded successfully!");
-      await loadAdminData();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "Failed to seed sheets");
+      }
+      showSuccess(data.message || "Sample data seeded successfully!");
+      await loadAdminData(true);
     } catch (err: any) {
-      alert(`Failed to seed: ${err.message}`);
+      showError(err.message || "Failed to seed data.");
     } finally {
       setSeedingSheets(false);
     }
@@ -176,7 +231,12 @@ export default function AdminPage() {
     if (!file) return;
 
     if (!file.name.endsWith(".docx")) {
-      alert("Please select a Microsoft Word (.docx) file.");
+      showError("Please select a Microsoft Word (.docx) file.");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      showError("File size exceeds 5MB limit.");
       return;
     }
 
@@ -187,6 +247,7 @@ export default function AdminPage() {
     try {
       const res = await fetch("/api/policy", {
         method: "POST",
+        headers: getAuthHeaders(),
         body: formData,
       });
 
@@ -195,10 +256,10 @@ export default function AdminPage() {
         throw new Error(data.error || "Upload failed");
       }
 
-      showSuccess("Successfully updated and re-parsed company_policies.docx!");
-      await loadAdminData();
+      showSuccess("Successfully updated and re-indexed policy document!");
+      await loadAdminData(true);
     } catch (err: any) {
-      alert(`Error uploading policy: ${err.message}`);
+      showError(err.message || "Error uploading policy document.");
     } finally {
       setUploadingPolicy(false);
     }
@@ -206,178 +267,293 @@ export default function AdminPage() {
 
   function showSuccess(msg: string) {
     setActionSuccessMsg(msg);
-    setTimeout(() => setActionSuccessMsg(null), 4500);
+    setTimeout(() => setActionSuccessMsg(null), 4000);
   }
 
+  function showError(msg: string) {
+    setActionErrorMsg(msg);
+    setTimeout(() => setActionErrorMsg(null), 5000);
+  }
+
+  // Loading state during initial session check
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 text-sm">
+        <RefreshCw className="w-5 h-5 animate-spin mr-2" />
+        <span>Verifying access...</span>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SECURE LOGIN SCREEN (Shown if not logged in)
+  // -------------------------------------------------------------
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center p-4 selection:bg-indigo-500 selection:text-white">
+        <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden p-8 space-y-6">
+          {/* Logo & Lock Badge */}
+          <div className="text-center space-y-2">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-indigo-500/25">
+              <Lock className="w-7 h-7" />
+            </div>
+            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
+              ApexStore Admin
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-500">
+              Sign in with your staff credentials to manage orders, refunds, and policies.
+            </p>
+          </div>
+
+          {/* Error Message */}
+          {loginError && (
+            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center space-x-2">
+              <XCircle className="w-4 h-4 shrink-0" />
+              <span>{loginError}</span>
+            </div>
+          )}
+
+          {/* Login Form */}
+          <form onSubmit={handleLogin} className="space-y-4" autoComplete="off" data-form-type="other">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700">
+                Staff Email
+              </label>
+              <input
+                type="email"
+                name="apex_staff_id"
+                required
+                autoComplete="off"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="Enter your email"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition-all bg-slate-50/50"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700">
+                Password
+              </label>
+              <input
+                type="password"
+                name="apex_staff_key"
+                required
+                autoComplete="new-password"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Enter your password"
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition-all bg-slate-50/50"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loggingIn || !loginPassword.trim()}
+              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-semibold text-sm shadow-md shadow-indigo-500/20 transition-all disabled:opacity-50 flex items-center justify-center space-x-2 active:scale-[0.99]"
+            >
+              {loggingIn ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Signing In...</span>
+                </>
+              ) : (
+                <span>Sign In to Dashboard</span>
+              )}
+            </button>
+          </form>
+
+          <div className="text-center pt-1">
+            <Link
+              href="/"
+              className="text-xs font-medium text-slate-500 hover:text-slate-800 transition-colors"
+            >
+              &larr; Return to Customer Storefront
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // AUTHENTICATED DASHBOARD VIEW
+  // -------------------------------------------------------------
   const pendingRefunds = refunds.filter((r) => r.adminStatus === "PENDING");
+  const approvedRefunds = refunds.filter((r) => r.adminStatus === "APPROVED");
+  const totalApprovedAmount = approvedRefunds.reduce((sum, r) => sum + (r.refundAmount || 0), 0);
+
+  const filteredInteractions = interactions.filter((int) => {
+    if (!inquirySearch.trim()) return true;
+    const q = inquirySearch.toLowerCase();
+    return (
+      int.customerEmail.toLowerCase().includes(q) ||
+      int.customerQuery.toLowerCase().includes(q) ||
+      int.agentResponse.toLowerCase().includes(q)
+    );
+  });
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col selection:bg-indigo-500 selection:text-white">
-      {/* Top Header */}
-      <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30">
+    <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-indigo-500 selection:text-white">
+      {/* Header Bar */}
+      <header className="sticky top-0 z-30 bg-slate-900 border-b border-slate-800 text-white shadow-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <Link
               href="/"
-              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
               title="Return to Storefront"
             >
               <ArrowLeft className="w-4 h-4" />
             </Link>
-            <div className="flex items-center space-x-2">
-              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-sm">
-                <ShieldCheck className="w-4 h-4" />
-              </div>
-              <div>
-                <h1 className="text-base font-bold text-white leading-none">ApexStore Operations Hub</h1>
-                <p className="text-[11px] text-slate-400 mt-0.5">Admin & AI Policy Governance</p>
-              </div>
+            <div>
+              <h1 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                ApexStore Admin
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center space-x-3">
-            {/* Live Auto-Sync Status Badge */}
-            <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700/80 text-xs">
-              <span className="relative flex h-2 w-2">
-                {autoSyncInterval > 0 ? (
-                  <>
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                  </>
-                ) : (
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
-                )}
+          <div className="flex items-center space-x-3 text-xs">
+            {lastSyncedTime && (
+              <span className="text-slate-400 hidden md:inline text-[11px]">
+                Updated {lastSyncedTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
               </span>
-              <span className="text-slate-300 font-medium hidden sm:inline">
-                {autoSyncInterval > 0 ? `Sheets Sync: ${autoSyncInterval}s (Min)` : "Sheets Sync: Paused"}
-              </span>
-              <select
-                value={autoSyncInterval}
-                onChange={(e) => setAutoSyncInterval(Number(e.target.value))}
-                className="bg-slate-900 text-slate-200 text-[11px] rounded px-1.5 py-0.5 border border-slate-700 focus:outline-none cursor-pointer"
-                title="Change Google Sheets auto-sync interval"
-              >
-                <option value={3}>3s (Minimum)</option>
-                <option value={5}>5s</option>
-                <option value={10}>10s</option>
-                <option value={0}>Paused</option>
-              </select>
-            </div>
+            )}
 
             <button
               onClick={() => loadAdminData(false)}
               disabled={refreshing}
               className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition-colors disabled:opacity-50"
-              title="Manual sync now"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
-              <span className="hidden sm:inline">Refresh</span>
+              <span>Refresh</span>
             </button>
+
             <Link
               href="/"
-              className="text-xs font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
             >
-              Open Storefront &rarr;
+              View Store &rarr;
             </Link>
+
+            <button
+              onClick={handleSignOut}
+              className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-medium transition-colors"
+              title="Sign Out of Admin"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out</span>
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Success Notification Alert */}
+      {/* Notifications */}
       {actionSuccessMsg && (
         <div className="bg-emerald-600 text-white text-xs py-2 px-4 text-center font-medium shadow-sm flex items-center justify-center space-x-2 animate-in fade-in">
           <CheckCircle2 className="w-4 h-4" />
           <span>{actionSuccessMsg}</span>
         </div>
       )}
+      {actionErrorMsg && (
+        <div className="bg-rose-600 text-white text-xs py-2 px-4 text-center font-medium shadow-sm flex items-center justify-center space-x-2 animate-in fade-in">
+          <XCircle className="w-4 h-4" />
+          <span>{actionErrorMsg}</span>
+        </div>
+      )}
 
-      {/* Main Container */}
+      {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full space-y-6">
-        {/* KPI / Diagnostic Status Cards */}
+        {/* KPI Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Google Sheets Status */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-3.5">
-            <div
-              className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
-                googleSheetsInfo?.connected
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-amber-100 text-amber-700"
+          {/* Card 1: Pending Refunds */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center shrink-0">
+              <Clock className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="text-xs font-semibold text-slate-500 block">Pending Review</span>
+              <div className="text-2xl font-extrabold text-slate-900 mt-0.5">
+                {pendingRefunds.length}
+              </div>
+              <span className="text-[11px] text-amber-600 font-medium">
+                {pendingRefunds.length === 0 ? "All caught up" : "Action required"}
+              </span>
+            </div>
+          </div>
+
+          {/* Card 2: Total Processed */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-200 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="text-xs font-semibold text-slate-500 block">Resolved Refunds</span>
+              <div className="text-2xl font-extrabold text-slate-900 mt-0.5">
+                ${totalApprovedAmount.toFixed(2)}
+              </div>
+              <span className="text-[11px] text-slate-400">
+                {approvedRefunds.length} approved payouts
+              </span>
+            </div>
+          </div>
+
+          {/* Card 3: Auto-Approve Toggle */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+            <div className="space-y-0.5 pr-2">
+              <span className="text-xs font-semibold text-slate-500 block">Auto-Approval</span>
+              <div className="text-sm font-bold text-slate-900">
+                {autoApprove ? "Enabled" : "Manual Review"}
+              </div>
+              <p className="text-[11px] text-slate-400">
+                {autoApprove ? "Eligible refunds auto-pass" : "Staff approves each refund"}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoApprove}
+              onClick={handleToggleAutoApprove}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                autoApprove ? "bg-indigo-600" : "bg-slate-300"
               }`}
             >
-              <Table className="w-5 h-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-                Google Sheets
-              </span>
-              <span className="text-sm font-bold text-slate-900 truncate block">
-                {googleSheetsInfo?.connected ? googleSheetsInfo.sheetTitle : "Local In-Memory Mode"}
-              </span>
-              <span className="text-[10px] text-slate-400">
-                {googleSheetsInfo?.connected ? `ID: ${googleSheetsInfo.sheetId?.slice(0, 8)}...` : "Set .env.local to link live sheet"}
-              </span>
-            </div>
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                  autoApprove ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
           </div>
 
-          {/* Policy Document Status */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-3.5">
-            <div className="w-11 h-11 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
-              <FileText className="w-5 h-5" />
+          {/* Card 4: Data Connection */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-200 flex items-center justify-center shrink-0">
+              <Table className="w-6 h-6" />
             </div>
-            <div className="min-w-0 flex-1">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-                Word Policy (.docx)
+            <div>
+              <span className="text-xs font-semibold text-slate-500 block">Database Status</span>
+              <div className="text-sm font-bold text-slate-900 mt-0.5">
+                {googleSheetsInfo?.connected ? "Google Sheets Live" : "Local Database"}
+              </div>
+              <span className="text-[11px] text-emerald-600 font-medium flex items-center space-x-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                <span>Synced & Ready</span>
               </span>
-              <span className="text-sm font-bold text-slate-900 truncate block">
-                company_policies.docx
-              </span>
-              <span className="text-[10px] text-slate-400">
-                {policyInfo?.charCount || 0} characters indexed
-              </span>
-            </div>
-          </div>
-
-          {/* Pending Refunds */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-3.5">
-            <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
-              <Clock className="w-5 h-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-                Pending Approval
-              </span>
-              <span className="text-xl font-bold text-slate-900">
-                {pendingRefunds.length}
-              </span>
-              <span className="text-[10px] text-slate-400">Human-in-the-Loop Queue</span>
-            </div>
-          </div>
-
-          {/* Automated Emails Sent */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center space-x-3.5">
-            <div className="w-11 h-11 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
-              <Mail className="w-5 h-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-                Dispatched Emails
-              </span>
-              <span className="text-xl font-bold text-slate-900">
-                {emails.length}
-              </span>
-              <span className="text-[10px] text-slate-400">Automated receipts generated</span>
             </div>
           </div>
         </div>
 
-        {/* Tab Navigation */}
+        {/* Clean 3-Tab Selector */}
         <div className="flex border-b border-slate-200 gap-2 overflow-x-auto pb-1 no-scrollbar">
           {[
-            { id: "refunds", label: `Refund Approvals (${pendingRefunds.length})`, icon: Receipt },
-            { id: "sheets", label: "Google Sheets Sync", icon: Table },
-            { id: "policy", label: "Company Policy (.docx)", icon: FileText },
-            { id: "emails", label: `Email Receipts (${emails.length})`, icon: Mail },
-            { id: "interactions", label: `Interactions Log (${interactions.length})`, icon: MessageSquare },
+            { id: "refunds", label: `Refund Requests (${refunds.length})`, icon: Receipt },
+            { id: "interactions", label: `Customer Inquiries (${interactions.length})`, icon: MessageSquare },
+            { id: "settings", label: "Settings & Documents", icon: FileText },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -387,7 +563,7 @@ export default function AdminPage() {
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`flex items-center space-x-2 px-4 py-2.5 rounded-xl font-medium text-xs sm:text-sm transition-all whitespace-nowrap ${
                   isActive
-                    ? "bg-indigo-600 text-white shadow-sm"
+                    ? "bg-indigo-600 text-white shadow-xs"
                     : "bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 border border-slate-200"
                 }`}
               >
@@ -398,480 +574,175 @@ export default function AdminPage() {
           })}
         </div>
 
-        {/* TAB 1: REFUND APPROVALS QUEUE */}
+        {/* TAB 1: REFUND REQUESTS */}
         {activeTab === "refunds" && (
-          <div className="space-y-4">
-            {/* Auto-Approve Toggle Controls */}
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs space-y-4">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
-                  <span>Refund Workflow & Human-in-the-Loop Mode</span>
-                </h3>
+                <h2 className="font-bold text-slate-900 text-sm sm:text-base">Customer Refund Requests</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  When enabled, agent immediately approves and emails eligible refunds. When disabled, refunds require manual review below.
+                  Review and resolve refund claims submitted by customers or drafted by the AI assistant.
+                </p>
+              </div>
+              <span className="text-xs text-slate-400 font-medium">
+                {pendingRefunds.length} Pending
+              </span>
+            </div>
+
+            {refunds.length === 0 ? (
+              <div className="p-12 text-center text-slate-500 text-sm">
+                No refund requests logged yet. Use the customer chat or Order Tracker to submit a refund!
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 uppercase tracking-wider font-semibold">
+                    <tr>
+                      <th className="px-5 py-3">Order ID</th>
+                      <th className="px-5 py-3">Customer</th>
+                      <th className="px-5 py-3">Amount</th>
+                      <th className="px-5 py-3">Reason</th>
+                      <th className="px-5 py-3">Status</th>
+                      <th className="px-5 py-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {refunds.map((r) => (
+                      <tr key={r.refundId} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="px-5 py-3.5 font-mono font-bold text-slate-900">
+                          {r.orderId}
+                          <span className="block text-[10px] text-slate-400 font-normal">{r.refundId}</span>
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <span className="block font-medium text-slate-900">{r.customerEmail}</span>
+                          <span className="text-[10px] text-slate-400">{r.createdAt?.split("T")[0]}</span>
+                        </td>
+                        <td className="px-5 py-3.5 font-bold text-slate-900 text-sm">
+                          ${r.refundAmount.toFixed(2)}
+                        </td>
+                        <td className="px-5 py-3.5 max-w-[240px]">
+                          <p className="text-slate-800 font-medium truncate" title={r.reason}>
+                            {r.reason}
+                          </p>
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
+                              r.adminStatus === "APPROVED"
+                                ? "bg-emerald-100 text-emerald-800"
+                                : r.adminStatus === "PENDING"
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-rose-100 text-rose-800"
+                            }`}
+                          >
+                            {r.adminStatus}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3.5 text-right space-x-2 whitespace-nowrap">
+                          {r.adminStatus === "PENDING" ? (
+                            <>
+                              <button
+                                disabled={processingRefundId === r.refundId}
+                                onClick={() => handleRefundAction(r.refundId, "APPROVE")}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-medium text-xs transition-colors shadow-xs"
+                              >
+                                {processingRefundId === r.refundId ? "Saving..." : "Approve"}
+                              </button>
+                              <button
+                                disabled={processingRefundId === r.refundId}
+                                onClick={() => handleRefundAction(r.refundId, "REJECT")}
+                                className="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 font-medium text-xs transition-colors border border-rose-200"
+                              >
+                                {processingRefundId === r.refundId ? "Saving..." : "Reject"}
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-xs text-slate-400 italic">Resolved</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 2: CUSTOMER INQUIRIES */}
+        {activeTab === "interactions" && (
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs space-y-4 p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <h2 className="font-bold text-slate-900 text-sm sm:text-base">Recent Customer Conversations</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Real-time log of customer questions and the AI agent's grounded replies.
                 </p>
               </div>
 
-              <div className="flex items-center space-x-3">
-                <span className="text-xs font-semibold text-slate-700">
-                  {autoApprove ? "Auto-Approve: ON" : "Human-in-the-Loop: ACTIVE"}
-                </span>
-                <button
-                  type="button"
-                  onClick={handleToggleAutoApprove}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                    autoApprove ? "bg-indigo-600" : "bg-slate-300"
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                      autoApprove ? "translate-x-5" : "translate-x-0"
-                    }`}
-                  />
-                </button>
+              <div className="relative w-full sm:w-64">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={inquirySearch}
+                  onChange={(e) => setInquirySearch(e.target.value)}
+                  placeholder="Search conversations..."
+                  className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                />
               </div>
             </div>
 
-            {/* Refunds Table */}
-            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                <h4 className="font-semibold text-slate-900 text-sm">Customer Refund Requests</h4>
-                <span className="text-xs text-slate-500">Stored in Google Sheets <code>RefundRequests</code> tab</span>
+            {filteredInteractions.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-xs">
+                No customer interactions recorded yet.
               </div>
-
-              {refunds.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 text-sm">
-                  No refund requests logged yet. Use the customer AI chat to submit a refund!
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 uppercase tracking-wider font-semibold">
-                      <tr>
-                        <th className="px-4 py-3">Refund ID</th>
-                        <th className="px-4 py-3">Order ID</th>
-                        <th className="px-4 py-3">Customer</th>
-                        <th className="px-4 py-3">Amount</th>
-                        <th className="px-4 py-3">Reason</th>
-                        <th className="px-4 py-3">Policy Citation</th>
-                        <th className="px-4 py-3">Status</th>
-                        <th className="px-4 py-3 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 text-slate-700">
-                      {refunds.map((r) => (
-                        <tr key={r.refundId} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="px-4 py-3 font-mono font-bold text-indigo-600">
-                            {r.refundId}
-                          </td>
-                          <td className="px-4 py-3 font-mono font-medium text-slate-900">
-                            {r.orderId}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="block font-medium text-slate-900">{r.customerEmail}</span>
-                            <span className="text-[10px] text-slate-400">{r.createdAt?.split("T")[0]}</span>
-                          </td>
-                          <td className="px-4 py-3 font-bold text-slate-900 text-sm">
-                            ${r.refundAmount.toFixed(2)}
-                          </td>
-                          <td className="px-4 py-3 max-w-[180px] truncate" title={r.reason}>
-                            {r.reason}
-                          </td>
-                          <td className="px-4 py-3 max-w-[200px] truncate text-[11px] text-slate-500" title={r.policyCitation}>
-                            {r.policyCitation}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                                r.adminStatus === "APPROVED"
-                                  ? "bg-emerald-100 text-emerald-800"
-                                  : r.adminStatus === "PENDING"
-                                  ? "bg-amber-100 text-amber-800 animate-pulse"
-                                  : "bg-rose-100 text-rose-800"
-                              }`}
-                            >
-                              {r.adminStatus}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
-                            {r.adminStatus === "PENDING" ? (
-                              <>
-                                <button
-                                  onClick={() => handleRefundAction(r.refundId, "APPROVE")}
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-[11px] transition-colors"
-                                >
-                                  Approve & Email
-                                </button>
-                                <button
-                                  onClick={() => handleRefundAction(r.refundId, "REJECT")}
-                                  className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-medium text-[11px] transition-colors"
-                                >
-                                  Reject
-                                </button>
-                              </>
-                            ) : (
-                              <span className="text-[11px] text-slate-400 italic">Resolved</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* TAB 2: GOOGLE SHEETS LIVE SYNC */}
-        {activeTab === "sheets" && (
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <h3 className="font-bold text-slate-900 text-lg flex items-center space-x-2">
-                    <Table className="w-5 h-5 text-indigo-600" />
-                    <span>Google Sheets Integration Settings</span>
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Connects strictly via Google Cloud Service Account JWT and Google Sheets API v4.
-                  </p>
-                </div>
-
-                <div className="flex items-center space-x-3">
-                  <button
-                    onClick={handleSeedSheets}
-                    disabled={seedingSheets}
-                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold shadow-sm transition-all flex items-center space-x-1.5"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${seedingSheets ? "animate-spin" : ""}`} />
-                    <span>{seedingSheets ? "Seeding..." : "Seed / Reset Google Sheets Data"}</span>
-                  </button>
-
-                  {googleSheetsInfo?.sheetId && (
-                    <a
-                      href={`https://docs.google.com/spreadsheets/d/${googleSheetsInfo.sheetId}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors flex items-center space-x-1.5"
-                    >
-                      <span>Open Live Sheet</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                  )}
-                </div>
-              </div>
-
-              {/* Status Banner */}
-              <div
-                className={`p-4 rounded-xl border ${
-                  googleSheetsInfo?.connected
-                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                    : "bg-amber-50 border-amber-200 text-amber-800"
-                }`}
-              >
-                <div className="flex items-start space-x-3">
-                  {googleSheetsInfo?.connected ? (
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                  )}
-                  <div className="space-y-1 text-xs">
-                    <h4 className="font-semibold text-sm">
-                      {googleSheetsInfo?.connected
-                        ? `Live Connection Active: "${googleSheetsInfo.sheetTitle}"`
-                        : "Google Sheets Credentials Missing in .env.local"}
-                    </h4>
-                    <p className="opacity-90">
-                      {googleSheetsInfo?.connected
-                        ? `All customer interactions, orders, and refund requests are synchronizing in real time to Sheet ID ${googleSheetsInfo.sheetId}.`
-                        : "The app is currently using built-in realistic mock data so it runs seamlessly out of the box. Follow the steps below to connect your real Google Sheet."}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Setup Instructions Guide */}
-              <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
-                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                  How to Connect Your Real Google Sheet (3 Steps):
-                </h4>
-                <ol className="list-decimal list-inside text-xs text-slate-600 space-y-2">
-                  <li>
-                    Create a new Google Sheet at <a href="https://sheets.new" target="_blank" className="text-indigo-600 underline">sheets.new</a> and copy the Sheet ID from the URL.
-                  </li>
-                  <li>
-                    In <a href="https://console.cloud.google.com" target="_blank" className="text-indigo-600 underline">Google Cloud Console</a>, enable <strong>Google Sheets API</strong>, create a Service Account, generate a JSON Key, and share your Google Sheet with the Service Account email as <strong>Editor</strong>.
-                  </li>
-                  <li>
-                    Add the following credentials to your <code>.env.local</code>:
-                    <pre className="mt-1.5 p-3 rounded-lg bg-slate-900 text-slate-200 font-mono text-[11px] overflow-x-auto">
-{`GOOGLE_SERVICE_ACCOUNT_EMAIL="your-sa@project.iam.gserviceaccount.com"
-GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-GOOGLE_SHEET_ID="your-spreadsheet-id"`}
-                    </pre>
-                  </li>
-                </ol>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 3: POLICY DOCUMENT MANAGER & CLAUSE-LEVEL RAG ENGINE */}
-        {activeTab === "policy" && (
-          <div className="space-y-6">
-            {/* Clause-Level RAG Explorer & Semantic Tester */}
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <h3 className="font-bold text-slate-900 text-lg flex items-center space-x-2">
-                      <Zap className="w-5 h-5 text-indigo-600" />
-                      <span>Clause-Level RAG Engine & Grounding Guardrails</span>
-                    </h3>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">
-                      IDF Rare-Token Retrieval
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Directly indexes granular clauses from <code>company_policies.docx</code> with verbatim citations and zero-hallucination guardrails.
-                  </p>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    <ShieldCheck className="w-3.5 h-3.5 mr-1" />
-                    Strict Grounding Active
-                  </span>
-                </div>
-              </div>
-
-              {/* Interactive RAG Search Query Bar */}
+            ) : (
               <div className="space-y-3">
-                <label className="block text-xs font-semibold text-slate-700">
-                  Test Semantic Policy Retrieval (Simulate Eren Agent Query):
-                </label>
-                <div className="flex items-center space-x-2">
-                  <div className="relative flex-1">
-                    <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="text"
-                      value={ragQuery}
-                      onChange={(e) => setRagQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && handleTestRAG()}
-                      placeholder="e.g. Can I return opened earbuds? or What is the return window for Gold members?"
-                      className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition-all bg-slate-50/50"
-                    />
-                  </div>
-                  <button
-                    onClick={() => handleTestRAG()}
-                    disabled={ragSearching || !ragQuery.trim()}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium text-xs sm:text-sm transition-all shadow-xs flex items-center space-x-1.5 shrink-0"
+                {filteredInteractions.map((int, idx) => (
+                  <div
+                    key={idx}
+                    className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2 text-xs"
                   >
-                    {ragSearching ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Searching...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Search className="w-3.5 h-3.5" />
-                        <span>Retrieve Clauses</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {/* Quick Test Prompt Chips */}
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs">
-                  <span className="text-[11px] text-slate-400 shrink-0 font-medium">Test Queries:</span>
-                  {[
-                    { label: "🎧 Opened Earbuds", query: "Can I return opened earbuds?" },
-                    { label: "⚡ Cracked Screen DOA", query: "Smartwatch arrived with a cracked screen DOA" },
-                    { label: "👑 Gold Tier 45-Day", query: "What is the return window for Gold tier customers?" },
-                    { label: "📦 Opened Box $5 Fee", query: "How much is the restocking fee for opened box?" },
-                    { label: "💳 Digital Gift Cards", query: "Can I return a digital gift card?" },
-                  ].map((chip, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => {
-                        setRagQuery(chip.query);
-                        handleTestRAG(chip.query);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 text-[11px] font-medium transition-colors whitespace-nowrap border border-slate-200/70"
-                    >
-                      {chip.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* RAG Retrieved Clauses Output */}
-              <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span className="font-semibold text-slate-800">
-                    Retrieved Policy Clauses ({ragResults.length} matches):
-                  </span>
-                  <span>Evaluated against 21 chunked sub-clauses</span>
-                </div>
-
-                {ragResults.length === 0 ? (
-                  <div className="p-6 text-center text-slate-400 text-xs bg-slate-50 rounded-xl border border-slate-200">
-                    No clauses retrieved yet. Type a question above or click a test query chip.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 gap-3">
-                    {ragResults.map((clause, idx) => (
-                      <div
-                        key={idx}
-                        className="p-4 rounded-xl border border-slate-200 bg-white hover:border-indigo-300 transition-all shadow-xs space-y-2.5"
-                      >
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                          <div className="flex items-center space-x-2">
-                            <span className="font-mono text-xs font-bold px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
-                              {clause.sectionId}
-                            </span>
-                            <h4 className="font-semibold text-slate-900 text-xs sm:text-sm">
-                              {clause.title}
-                            </h4>
-                          </div>
-
-                          <div className="flex items-center space-x-2">
-                            <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                                clause.matchConfidence === "HIGH"
-                                  ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                                  : "bg-amber-100 text-amber-800 border border-amber-200"
-                              }`}
-                            >
-                              {clause.matchConfidence} CONFIDENCE ({clause.relevanceScore}%)
-                            </span>
-                            <span className="text-[10px] text-slate-400">
-                              Rank #{idx + 1}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Clause Content Body */}
-                        <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-100 font-sans">
-                          {clause.content}
-                        </p>
-
-                        {/* Matched Token Tags & Guardrail Pill */}
-                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 text-[11px]">
-                          <div className="flex items-center space-x-1.5 flex-wrap">
-                            <span className="text-slate-400 text-[10px]">Matched Tokens:</span>
-                            {clause.matchedTokens?.map((tok: string, tIdx: number) => (
-                              <span
-                                key={tIdx}
-                                className="px-1.5 py-0.2 rounded bg-indigo-50/80 text-indigo-700 font-mono text-[10px] border border-indigo-100"
-                              >
-                                {tok}
-                              </span>
-                            ))}
-                          </div>
-
-                          <span className="text-emerald-700 text-[10px] font-semibold flex items-center space-x-1">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            <span>Strict Grounding Guardrail: Verbatim Citation Verified</span>
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Strict Grounding Guardrails Verification Matrix */}
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
-                    <ShieldCheck className="w-5 h-5 text-emerald-600" />
-                    <span>Strict Grounding Guardrails Compliance Suite</span>
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Automated pre-flight checks ensuring the agent cannot hallucinate refund eligibility or numbers.
-                  </p>
-                </div>
-                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
-                  5 of 5 Checks Passing (100%)
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {[
-                  {
-                    title: "Return Window Enforcement",
-                    rule: "30-Day standard window; 45-day extension strictly enforced for Gold Tier members.",
-                    clause: "SEC-2.1 & SEC-2.4",
-                    status: "Enforced",
-                  },
-                  {
-                    title: "Hygiene Seal Exclusion",
-                    rule: "Personal hygiene electronics (earbuds/headphones) with broken seal strictly non-refundable.",
-                    clause: "SEC-4.2",
-                    status: "Enforced",
-                  },
-                  {
-                    title: "DOA 100% Refund Guarantee",
-                    rule: "Defective on Arrival receives 100% refund + complimentary return shipping within 14 days.",
-                    clause: "SEC-3.1",
-                    status: "Enforced",
-                  },
-                  {
-                    title: "Opened Box Restocking Fee",
-                    rule: "$5.00 restocking fee deducted for working opened items; automatically waived for Gold Tier.",
-                    clause: "SEC-3.3 & SEC-2.4",
-                    status: "Enforced",
-                  },
-                  {
-                    title: "Accidental Damage Exclusion",
-                    rule: "Liquid spills, drops, and customer misuse are strictly excluded from refund eligibility.",
-                    clause: "SEC-3.4",
-                    status: "Enforced",
-                  },
-                  {
-                    title: "Google Sheets Truth Source",
-                    rule: "Order numbers, delivery dates, and prices are strictly bound to live Google Sheets records.",
-                    clause: "SEC-1 & G-Sheets",
-                    status: "Enforced",
-                  },
-                ].map((item, idx) => (
-                  <div key={idx} className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-900 text-xs">{item.title}</span>
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">
-                        {item.status} ✓
-                      </span>
+                    <div className="flex items-center justify-between text-slate-500 text-[11px]">
+                      <span className="font-semibold text-slate-800">{int.customerEmail}</span>
+                      <span>{new Date(int.timestamp).toLocaleString()}</span>
                     </div>
-                    <p className="text-[11px] text-slate-600">{item.rule}</p>
-                    <div className="pt-1 text-[10px] text-indigo-600 font-mono font-semibold">
-                      Grounding Clause: {item.clause}
+
+                    <div className="p-2.5 rounded-lg bg-white border border-slate-200/80 text-slate-800">
+                      <span className="font-semibold text-indigo-700 block text-[11px] mb-0.5">Customer:</span>
+                      {int.customerQuery}
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-indigo-50/60 border border-indigo-100 text-slate-800">
+                      <span className="font-semibold text-indigo-900 block text-[11px] mb-0.5">Eren (AI Support):</span>
+                      {int.agentResponse}
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
+            )}
+          </div>
+        )}
 
-            {/* Document Manager & Mammoth Viewer */}
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div>
-                  <h3 className="font-bold text-slate-900 text-lg flex items-center space-x-2">
-                    <FileText className="w-5 h-5 text-purple-600" />
-                    <span>Company Policies Document (.docx) Source File</span>
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Parsed directly from <code>data/company_policies.docx</code> using <code>mammoth</code>.
-                  </p>
+        {/* TAB 3: SETTINGS & DOCUMENTS */}
+        {activeTab === "settings" && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Word Policy Document Manager */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm">Policy Document (.docx)</h3>
+                    <p className="text-xs text-slate-500">Source file for AI grounding</p>
+                  </div>
                 </div>
 
-                {/* Upload New .docx */}
-                <label className="cursor-pointer px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition-all flex items-center space-x-1.5 shrink-0">
+                <label className="cursor-pointer px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-xs transition-all flex items-center space-x-1.5 shrink-0">
                   <Upload className="w-3.5 h-3.5" />
-                  <span>{uploadingPolicy ? "Parsing..." : "Upload New .docx Policy"}</span>
+                  <span>{uploadingPolicy ? "Uploading..." : "Upload New .docx"}</span>
                   <input
                     type="file"
                     accept=".docx"
@@ -882,152 +753,64 @@ GOOGLE_SHEET_ID="your-spreadsheet-id"`}
                 </label>
               </div>
 
-              {/* Policy Preview Box */}
-              <div className="p-6 rounded-xl bg-slate-50 border border-slate-200 max-h-[450px] overflow-y-auto space-y-4 text-xs text-slate-800 leading-relaxed">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-                  <span className="font-semibold text-slate-900">Current Extracted Document Content</span>
-                  <span className="text-[11px] text-slate-500">
-                    Last modified: {policyInfo?.lastUpdated ? new Date(policyInfo.lastUpdated).toLocaleString() : "Recently"}
-                  </span>
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+                <div className="flex justify-between font-medium text-slate-800">
+                  <span>File: <code>company_policies.docx</code></span>
+                  <span>{policyInfo?.charCount || 3200} characters</span>
                 </div>
-
-                <div
-                  className="prose prose-sm max-w-none prose-headings:font-bold prose-headings:text-slate-900 prose-p:text-slate-700"
-                  dangerouslySetInnerHTML={{ __html: policyInfo?.htmlPreview || "<p>Loading policy...</p>" }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: EMAIL RECEIPTS VIEWER */}
-        {activeTab === "emails" && (
-          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs space-y-4 p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-slate-900 text-base">Automated Refund Confirmation Receipts</h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Generated and dispatched upon refund approval.
+                <p className="text-[11px] text-slate-500">
+                  Last updated: {policyInfo?.lastUpdated ? new Date(policyInfo.lastUpdated).toLocaleDateString() : "Active"}
                 </p>
               </div>
-              <span className="text-xs text-slate-400 font-mono">
-                SMTP / In-App Dispatcher Active
-              </span>
+
+              <Link
+                href="/#policies"
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-xs flex items-center justify-center space-x-1.5 transition-colors"
+              >
+                <span>View Customer-Facing Policies on Storefront</span>
+                <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
+              </Link>
             </div>
 
-            {emails.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-xs">
-                No emails dispatched yet. Approve a refund request in the Refund Queue to trigger an email!
-              </div>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {emails.map((email) => (
-                  <div key={email.id} className="py-3.5 flex items-center justify-between hover:bg-slate-50 px-2 rounded-xl transition-colors">
-                    <div className="space-y-1">
-                      <div className="flex items-center space-x-2">
-                        <span className="font-semibold text-slate-900 text-xs">{email.recipient}</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium">
-                          {email.status}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-600">{email.subject}</p>
-                      <span className="text-[10px] text-slate-400">{email.transportInfo} &bull; {new Date(email.sentAt).toLocaleString()}</span>
-                    </div>
-
-                    <button
-                      onClick={() => setSelectedEmail(email)}
-                      className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-700 text-xs font-medium transition-colors flex items-center space-x-1"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>Preview Receipt</span>
-                    </button>
+            {/* Google Sheets Sync Card */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                    <Table className="w-5 h-5" />
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm">Google Sheets Database</h3>
+                    <p className="text-xs text-slate-500">Inventory, orders & refund storage</p>
+                  </div>
+                </div>
 
-        {/* TAB 5: INTERACTIONS LOG */}
-        {activeTab === "interactions" && (
-          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <div>
-                <h4 className="font-semibold text-slate-900 text-sm">Customer Support Interaction History</h4>
-                <p className="text-xs text-slate-500">Persisted in Google Sheets <code>InteractionsLog</code> tab</p>
+                <button
+                  onClick={handleSeedSheets}
+                  disabled={seedingSheets}
+                  className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-50"
+                >
+                  {seedingSheets ? "Resetting..." : "Reset Sample Data"}
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+                <div className="flex justify-between font-medium text-slate-800">
+                  <span>Status:</span>
+                  <span className={googleSheetsInfo?.connected ? "text-emerald-600 font-bold" : "text-slate-700"}>
+                    {googleSheetsInfo?.connected ? "Connected to Cloud Sheet" : "Using Local In-Memory Store"}
+                  </span>
+                </div>
+                {googleSheetsInfo?.sheetTitle && (
+                  <p className="text-[11px] text-slate-500">
+                    Spreadsheet: "{googleSheetsInfo.sheetTitle}"
+                  </p>
+                )}
               </div>
             </div>
-
-            {interactions.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-xs">No interactions logged yet.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 uppercase tracking-wider font-semibold">
-                    <tr>
-                      <th className="px-4 py-3">Timestamp</th>
-                      <th className="px-4 py-3">Customer</th>
-                      <th className="px-4 py-3">Query</th>
-                      <th className="px-4 py-3">AI Response Summary</th>
-                      <th className="px-4 py-3">Tools Invoked</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {interactions.map((it, idx) => (
-                      <tr key={`${it.interactionId || "int"}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">
-                          {new Date(it.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                        </td>
-                        <td className="px-4 py-3 font-medium text-slate-900 whitespace-nowrap">
-                          {it.customerEmail}
-                        </td>
-                        <td className="px-4 py-3 max-w-[200px] truncate" title={it.customerQuery}>
-                          {it.customerQuery}
-                        </td>
-                        <td className="px-4 py-3 max-w-[300px] truncate text-slate-600" title={it.agentResponse}>
-                          {it.agentResponse}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                            {it.toolCallsUsed}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
         )}
       </main>
-
-      {/* Email Preview Modal */}
-      {selectedEmail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <h4 className="font-semibold text-slate-900 text-sm">Receipt Preview: {selectedEmail.subject}</h4>
-                <p className="text-[11px] text-slate-500">Recipient: {selectedEmail.recipient}</p>
-              </div>
-              <button
-                onClick={() => setSelectedEmail(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
-              >
-                <XCircle className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="p-4 overflow-y-auto flex-1 bg-slate-100">
-              <iframe
-                srcDoc={selectedEmail.htmlContent}
-                title="Email Receipt"
-                className="w-full h-[480px] bg-white rounded-xl shadow-xs border border-slate-200"
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

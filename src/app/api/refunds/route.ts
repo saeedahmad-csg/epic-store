@@ -5,18 +5,29 @@ import {
   getOrderById,
 } from "@/lib/googleSheets";
 import { sendRefundConfirmationEmail } from "@/lib/email";
+import { requireAdminKey } from "@/lib/adminAuth";
 
-export async function GET() {
+export async function GET(req?: NextRequest) {
   try {
+    const authError = requireAdminKey(req);
+    if (authError) return authError;
+
     const refunds = await getRefundRequests();
     return NextResponse.json({ refunds });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Error in /api/refunds GET:", err);
+    return NextResponse.json(
+      { error: "An internal server error occurred while retrieving refunds." },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const authError = requireAdminKey(req);
+    if (authError) return authError;
+
     const body = await req.json();
     const { refundId, action } = body;
 
@@ -32,15 +43,15 @@ export async function POST(req: NextRequest) {
 
     if (!updateRes.success || !updateRes.refund) {
       return NextResponse.json(
-        { error: updateRes.error || "Failed to update refund." },
+        { error: "Failed to update refund status in store records." },
         { status: 500 }
       );
     }
 
-    let emailResult = null;
     if (newAdminStatus === "APPROVED") {
       const order = await getOrderById(updateRes.refund.orderId);
-      emailResult = await sendRefundConfirmationEmail({
+      // Run email dispatch asynchronously in background so SMTP network timeouts never block the admin UI
+      sendRefundConfirmationEmail({
         customerEmail: updateRes.refund.customerEmail,
         customerName: order?.customerName || "Customer",
         refundId: updateRes.refund.refundId,
@@ -48,16 +59,18 @@ export async function POST(req: NextRequest) {
         productName: order?.productName || updateRes.refund.productId,
         amount: updateRes.refund.refundAmount,
         reason: updateRes.refund.reason,
-      });
+      }).catch((err) => console.warn("Background refund email dispatch warning:", err));
     }
 
     return NextResponse.json({
       success: true,
       refund: updateRes.refund,
-      emailDispatched: emailResult,
     });
   } catch (err: any) {
-    console.error("Error in /api/refunds:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Error in /api/refunds POST:", err);
+    return NextResponse.json(
+      { error: "An internal server error occurred while processing refund action." },
+      { status: 500 }
+    );
   }
 }

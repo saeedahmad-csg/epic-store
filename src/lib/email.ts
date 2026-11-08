@@ -137,6 +137,8 @@ export async function sendRefundConfirmationEmail(params: {
         host,
         port,
         secure: port === 465,
+        requireTLS: port !== 465,
+        tls: { rejectUnauthorized: true },
         auth: { user, pass },
       });
 

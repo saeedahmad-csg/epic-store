@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCompanyPolicies, searchPolicyRAG, updatePolicyDocument } from "@/lib/policies";
+import { requireAdminKey } from "@/lib/adminAuth";
 
 export async function GET(req: NextRequest) {
   try {
@@ -18,12 +19,19 @@ export async function GET(req: NextRequest) {
     const policies = await getCompanyPolicies();
     return NextResponse.json(policies);
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Error in /api/policy GET:", err);
+    return NextResponse.json(
+      { error: "An internal server error occurred while retrieving policy clauses." },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const authError = requireAdminKey(req);
+    if (authError) return authError;
+
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
 
@@ -35,6 +43,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: "Invalid file type. Only Microsoft Word (.docx) files are supported." },
         { status: 400 }
+      );
+    }
+
+    // 5 MB file size limit to prevent memory exhaustion
+    if (file.size > 5 * 1024 * 1024) {
+      return NextResponse.json(
+        { error: "File exceeds 5 MB size limit." },
+        { status: 413 }
       );
     }
 
@@ -54,6 +70,9 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: any) {
     console.error("Error in /api/policy POST:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "An internal server error occurred while updating the policy document." },
+      { status: 500 }
+    );
   }
 }

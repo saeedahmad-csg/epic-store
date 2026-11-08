@@ -7,6 +7,7 @@ export interface Product {
   stockQuantity: number;
   description: string;
   eligibleForRefund: boolean;
+  imageUrl?: string;
 }
 
 export interface Order {
@@ -64,6 +65,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 42,
     description: "Premium over-ear noise-cancelling headphones with 40-hour battery life and spatial audio.",
     eligibleForRefund: true,
+    imageUrl: "/products/headphones.jpg",
   },
   {
     id: "PROD-102",
@@ -74,6 +76,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 18,
     description: "Titanium casing smartwatch with ECG sensor, GPS routing, and 5 ATM water resistance.",
     eligibleForRefund: true,
+    imageUrl: "/products/smartwatch.jpg",
   },
   {
     id: "PROD-103",
@@ -84,6 +87,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 65,
     description: "Compact wireless earbuds with deep bass. Note: Hygiene sealed package.",
     eligibleForRefund: true, // Only if unsealed/unopened per policy
+    imageUrl: "/products/earbuds.jpg",
   },
   {
     id: "PROD-104",
@@ -94,6 +98,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 120,
     description: "Dual USB-C and USB-A high-speed fast charger compatible with laptops and smartphones.",
     eligibleForRefund: true,
+    imageUrl: "/products/charger.jpg",
   },
   {
     id: "PROD-105",
@@ -104,6 +109,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 24,
     description: "Hot-swappable tactile mechanical keyboard with RGB backlighting and wrist rest.",
     eligibleForRefund: true,
+    imageUrl: "/products/keyboard.jpg",
   },
   {
     id: "PROD-106",
@@ -114,6 +120,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 9,
     description: "165Hz IPS 1ms HDR curved gaming and productivity monitor with USB-C hub.",
     eligibleForRefund: true,
+    imageUrl: "/products/monitor.jpg",
   },
   {
     id: "PROD-107",
@@ -124,6 +131,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 999,
     description: "Instant electronic store voucher code for any ApexStore purchase. Non-refundable.",
     eligibleForRefund: false,
+    imageUrl: "/products/giftcard.jpg",
   },
   {
     id: "PROD-108",
@@ -134,6 +142,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     stockQuantity: 7,
     description: "Water-resistant canvas travel backpack. Clearance 50% off - Final Sale.",
     eligibleForRefund: false, // Final Sale clearance per policy
+    imageUrl: "/products/backpack.jpg",
   },
 ];
 

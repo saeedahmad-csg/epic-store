@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProducts, searchProducts } from "@/lib/googleSheets";
+import { searchProducts } from "@/lib/googleSheets";
 
 export async function GET(req: NextRequest) {
   try {
@@ -10,6 +10,10 @@ export async function GET(req: NextRequest) {
     const products = await searchProducts(query, category);
     return NextResponse.json({ products });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Error in /api/products GET:", err);
+    return NextResponse.json(
+      { error: "An internal server error occurred while retrieving products." },
+      { status: 500 }
+    );
   }
 }

@@ -1,15 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { Sparkles, Bot, ShieldCheck, ShoppingBag, Search, ExternalLink } from "lucide-react";
+import { Sparkles, Bot, ShieldCheck, ShoppingBag, Search, ExternalLink, FileText } from "lucide-react";
 
 interface NavbarProps {
   onOpenChat: (initialPrompt?: string) => void;
   onOpenTracker: () => void;
   sheetsConnected?: boolean;
+  onScrollToPolicies?: () => void;
+  onScrollToProducts?: () => void;
 }
 
-export default function Navbar({ onOpenChat, onOpenTracker, sheetsConnected }: NavbarProps) {
+export default function Navbar({
+  onOpenChat,
+  onOpenTracker,
+  sheetsConnected,
+  onScrollToPolicies,
+  onScrollToProducts,
+}: NavbarProps) {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
@@ -29,12 +37,37 @@ export default function Navbar({ onOpenChat, onOpenTracker, sheetsConnected }: N
 
         {/* Center Nav Links */}
         <nav className="hidden md:flex items-center space-x-1">
-          <Link
-            href="/"
-            className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
-          >
-            Storefront
-          </Link>
+          {onScrollToProducts ? (
+            <button
+              onClick={onScrollToProducts}
+              className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              Shop
+            </button>
+          ) : (
+            <Link
+              href="/#products"
+              className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              Shop
+            </Link>
+          )}
+
+          {onScrollToPolicies ? (
+            <button
+              onClick={onScrollToPolicies}
+              className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              Policies
+            </button>
+          ) : (
+            <Link
+              href="/#policies"
+              className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors"
+            >
+              Policies
+            </Link>
+          )}
           <button
             onClick={onOpenTracker}
             className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors flex items-center space-x-1.5"
@@ -42,13 +75,6 @@ export default function Navbar({ onOpenChat, onOpenTracker, sheetsConnected }: N
             <Search className="w-3.5 h-3.5" />
             <span>Track Order</span>
           </button>
-          <Link
-            href="/admin"
-            className="px-3.5 py-1.5 text-sm font-medium text-slate-700 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition-colors flex items-center space-x-1.5"
-          >
-            <ShieldCheck className="w-4 h-4 text-slate-500" />
-            <span>Admin Portal</span>
-          </Link>
         </nav>
 
         {/* Right Actions */}

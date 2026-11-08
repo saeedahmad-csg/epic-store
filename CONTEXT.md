@@ -10,8 +10,8 @@
 ## 1. Project Overview & Identity
 - **Store Name:** **ApexStore** (Modern E-commerce Electronics & Peripherals)
 - **AI Concierge Name:** **Eren** (Customer Support & Operations Agent)
-- **Primary Model:** **`gemini-3.5-flash`** (Google GenAI SDK)
-- **Thinking Configuration:** Minimum Thinking Budget (`GEMINI_THINKING_BUDGET=0`) for instant sub-1.5s chat response latency.
+- **Primary Model:** **`gemini-flash-lite-latest`** (Google GenAI SDK)
+- **Thinking Configuration:** Explicit Zero Thinking Budget (`GEMINI_THINKING_BUDGET=0`) for instant chat response latency.
 - **Frontend Stack:** Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4, Lucide Icons, Canvas Confetti.
 
 ---

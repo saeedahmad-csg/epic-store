@@ -297,6 +297,10 @@ export async function seedGoogleSheets(): Promise<{ success: boolean; message: s
       }),
     ]);
 
+    cachedProductsResult = null;
+    cachedOrdersResult = null;
+    cachedCustomersResult = null;
+
     return {
       success: true,
       message: `Successfully initialized and seeded all 5 tabs in Google Sheet ${sheetId}!`,
@@ -313,8 +317,12 @@ export async function seedGoogleSheets(): Promise<{ success: boolean; message: s
 // -------------------------------------------------------------
 // Data Access Methods (with Google Sheets + memory fallback)
 // -------------------------------------------------------------
+// CACHED READ OPERATIONS (30-60s TTL for sub-10ms tool lookup)
+// -------------------------------------------------------------
 
 let cachedProductsResult: { products: Product[]; cachedAt: number } | null = null;
+let cachedOrdersResult: { orders: Order[]; cachedAt: number } | null = null;
+let cachedCustomersResult: { customers: Customer[]; cachedAt: number } | null = null;
 
 export async function getProducts(forceRefresh = false): Promise<Product[]> {
   if (!forceRefresh && cachedProductsResult && Date.now() - cachedProductsResult.cachedAt < 60000) {
@@ -333,22 +341,99 @@ export async function getProducts(forceRefresh = false): Promise<Product[]> {
     const rows = res.data.values || [];
     if (rows.length === 0) return memoryProducts;
 
-    const products = rows.map((row) => ({
-      id: row[0] || "",
-      name: row[1] || "",
-      category: row[2] || "",
-      price: parseFloat(row[3]) || 0,
-      discountPercent: parseFloat(row[4]) || 0,
-      stockQuantity: parseInt(row[5], 10) || 0,
-      description: row[6] || "",
-      eligibleForRefund: row[7]?.toUpperCase() === "TRUE",
-    }));
+    const products = rows.map((row) => {
+      const id = row[0] || "";
+      const fallbackProd = INITIAL_PRODUCTS.find((p) => p.id === id);
+      return {
+        id,
+        name: row[1] || "",
+        category: row[2] || "",
+        price: parseFloat(row[3]) || 0,
+        discountPercent: parseFloat(row[4]) || 0,
+        stockQuantity: parseInt(row[5], 10) || 0,
+        description: row[6] || "",
+        eligibleForRefund: row[7]?.toUpperCase() === "TRUE",
+        imageUrl: row[8] || fallbackProd?.imageUrl,
+      };
+    });
 
     cachedProductsResult = { products, cachedAt: Date.now() };
     return products;
   } catch (err) {
     console.warn("Could not fetch Products from Google Sheets, using memory fallback:", err);
     return memoryProducts;
+  }
+}
+
+export async function getAllOrders(forceRefresh = false): Promise<Order[]> {
+  if (!forceRefresh && cachedOrdersResult && Date.now() - cachedOrdersResult.cachedAt < 30000) {
+    return cachedOrdersResult.orders;
+  }
+
+  const client = getSheetsClient();
+  if (!client) return memoryOrders;
+
+  try {
+    const res = await client.sheets.spreadsheets.values.get({
+      spreadsheetId: client.sheetId,
+      range: "Orders!A2:K",
+    });
+
+    const rows = res.data.values || [];
+    if (rows.length === 0) return memoryOrders;
+
+    const orders: Order[] = rows.map((r) => ({
+      orderId: r[0] || "",
+      customerEmail: r[1] || "",
+      customerName: r[2] || "",
+      orderDate: r[3] || "",
+      deliveryDate: r[4] || "",
+      productId: r[5] || "",
+      productName: r[6] || "",
+      quantity: parseInt(r[7], 10) || 1,
+      totalAmount: parseFloat(r[8]) || 0,
+      paymentMethod: r[9] || "",
+      orderStatus: (r[10] as Order["orderStatus"]) || "Delivered",
+    }));
+
+    cachedOrdersResult = { orders, cachedAt: Date.now() };
+    return orders;
+  } catch (err) {
+    console.warn("Could not fetch Orders from Google Sheets, using memory fallback:", err);
+    return memoryOrders;
+  }
+}
+
+export async function getAllCustomers(forceRefresh = false): Promise<Customer[]> {
+  if (!forceRefresh && cachedCustomersResult && Date.now() - cachedCustomersResult.cachedAt < 30000) {
+    return cachedCustomersResult.customers;
+  }
+
+  const client = getSheetsClient();
+  if (!client) return memoryCustomers;
+
+  try {
+    const res = await client.sheets.spreadsheets.values.get({
+      spreadsheetId: client.sheetId,
+      range: "Customers!A2:E",
+    });
+
+    const rows = res.data.values || [];
+    if (rows.length === 0) return memoryCustomers;
+
+    const customers: Customer[] = rows.map((r) => ({
+      customerId: r[0] || "",
+      name: r[1] || "",
+      email: r[2] || "",
+      loyaltyTier: (r[3] as Customer["loyaltyTier"]) || "Bronze",
+      registeredDate: r[4] || "",
+    }));
+
+    cachedCustomersResult = { customers, cachedAt: Date.now() };
+    return customers;
+  } catch (err) {
+    console.warn("Could not fetch Customers from Google Sheets, using memory fallback:", err);
+    return memoryCustomers;
   }
 }
 
@@ -366,148 +451,32 @@ export async function searchProducts(query?: string, category?: string): Promise
 }
 
 export async function getOrderById(orderId: string): Promise<Order | null> {
-  const client = getSheetsClient();
-  if (!client) {
-    return memoryOrders.find((o) => o.orderId.toUpperCase() === orderId.trim().toUpperCase()) || null;
-  }
-
-  try {
-    const res = await client.sheets.spreadsheets.values.get({
-      spreadsheetId: client.sheetId,
-      range: "Orders!A2:K",
-    });
-
-    const rows = res.data.values || [];
-    const matched = rows.find((r) => r[0]?.toUpperCase() === orderId.trim().toUpperCase());
-    if (!matched) return null;
-
-    return {
-      orderId: matched[0],
-      customerEmail: matched[1],
-      customerName: matched[2],
-      orderDate: matched[3],
-      deliveryDate: matched[4],
-      productId: matched[5],
-      productName: matched[6],
-      quantity: parseInt(matched[7], 10) || 1,
-      totalAmount: parseFloat(matched[8]) || 0,
-      paymentMethod: matched[9],
-      orderStatus: (matched[10] as Order["orderStatus"]) || "Delivered",
-    };
-  } catch (err) {
-    console.warn("Could not fetch Order from Google Sheets, falling back to memory:", err);
-    return memoryOrders.find((o) => o.orderId.toUpperCase() === orderId.trim().toUpperCase()) || null;
-  }
+  const orders = await getAllOrders();
+  const normalized = orderId.trim().toUpperCase();
+  return orders.find((o) => o.orderId.toUpperCase() === normalized) || null;
 }
 
 export async function getOrdersByCustomer(email: string): Promise<Order[]> {
-  const client = getSheetsClient();
-  if (!client) {
-    return memoryOrders.filter((o) => o.customerEmail.toLowerCase() === email.trim().toLowerCase());
-  }
-
-  try {
-    const res = await client.sheets.spreadsheets.values.get({
-      spreadsheetId: client.sheetId,
-      range: "Orders!A2:K",
-    });
-
-    const rows = res.data.values || [];
-    return rows
-      .filter((r) => r[1]?.toLowerCase() === email.trim().toLowerCase())
-      .map((r) => ({
-        orderId: r[0],
-        customerEmail: r[1],
-        customerName: r[2],
-        orderDate: r[3],
-        deliveryDate: r[4],
-        productId: r[5],
-        productName: r[6],
-        quantity: parseInt(r[7], 10) || 1,
-        totalAmount: parseFloat(r[8]) || 0,
-        paymentMethod: r[9],
-        orderStatus: (r[10] as Order["orderStatus"]) || "Delivered",
-      }));
-  } catch (err) {
-    return memoryOrders.filter((o) => o.customerEmail.toLowerCase() === email.trim().toLowerCase());
-  }
+  const orders = await getAllOrders();
+  const normalized = email.trim().toLowerCase();
+  return orders.filter((o) => o.customerEmail.toLowerCase() === normalized);
 }
 
 export async function findOrdersByCustomerNameOrEmail(searchTerm: string): Promise<Order[]> {
   const term = searchTerm.trim().toLowerCase();
   if (!term) return [];
-
-  const client = getSheetsClient();
-  if (!client) {
-    return memoryOrders.filter(
-      (o) =>
-        o.customerEmail.toLowerCase().includes(term) ||
-        o.customerName.toLowerCase().includes(term)
-    );
-  }
-
-  try {
-    const res = await client.sheets.spreadsheets.values.get({
-      spreadsheetId: client.sheetId,
-      range: "Orders!A2:K",
-    });
-
-    const rows = res.data.values || [];
-    return rows
-      .filter((r) => {
-        const email = (r[1] || "").toLowerCase();
-        const name = (r[2] || "").toLowerCase();
-        return email.includes(term) || name.includes(term);
-      })
-      .map((r) => ({
-        orderId: r[0],
-        customerEmail: r[1],
-        customerName: r[2],
-        orderDate: r[3],
-        deliveryDate: r[4],
-        productId: r[5],
-        productName: r[6],
-        quantity: parseInt(r[7], 10) || 1,
-        totalAmount: parseFloat(r[8]) || 0,
-        paymentMethod: r[9],
-        orderStatus: (r[10] as Order["orderStatus"]) || "Delivered",
-      }));
-  } catch (err) {
-    return memoryOrders.filter(
-      (o) =>
-        o.customerEmail.toLowerCase().includes(term) ||
-        o.customerName.toLowerCase().includes(term)
-    );
-  }
+  const orders = await getAllOrders();
+  return orders.filter(
+    (o) =>
+      o.customerEmail.toLowerCase().includes(term) ||
+      o.customerName.toLowerCase().includes(term)
+  );
 }
 
-
 export async function getCustomerByEmail(email: string): Promise<Customer | null> {
-  const client = getSheetsClient();
-  if (!client) {
-    return memoryCustomers.find((c) => c.email.toLowerCase() === email.trim().toLowerCase()) || null;
-  }
-
-  try {
-    const res = await client.sheets.spreadsheets.values.get({
-      spreadsheetId: client.sheetId,
-      range: "Customers!A2:E",
-    });
-
-    const rows = res.data.values || [];
-    const matched = rows.find((r) => r[2]?.toLowerCase() === email.trim().toLowerCase());
-    if (!matched) return null;
-
-    return {
-      customerId: matched[0],
-      name: matched[1],
-      email: matched[2],
-      loyaltyTier: (matched[3] as Customer["loyaltyTier"]) || "Bronze",
-      registeredDate: matched[4],
-    };
-  } catch (err) {
-    return memoryCustomers.find((c) => c.email.toLowerCase() === email.trim().toLowerCase()) || null;
-  }
+  const customers = await getAllCustomers();
+  const normalized = email.trim().toLowerCase();
+  return customers.find((c) => c.email.toLowerCase() === normalized) || null;
 }
 
 export async function getRefundRequests(): Promise<RefundRequest[]> {
@@ -592,6 +561,7 @@ export async function updateRefundStatus(
 ): Promise<{ success: boolean; refund?: RefundRequest; error?: string }> {
   const index = memoryRefunds.findIndex((r) => r.refundId === refundId);
   const now = new Date().toISOString();
+  let updatedRefund: RefundRequest | undefined;
 
   if (index !== -1) {
     memoryRefunds[index].adminStatus = newAdminStatus;
@@ -601,20 +571,22 @@ export async function updateRefundStatus(
     } else {
       memoryRefunds[index].eligibilityStatus = "Rejected";
     }
+    updatedRefund = { ...memoryRefunds[index] };
   }
 
   const client = getSheetsClient();
   if (client) {
     try {
-      // Find row number in Google Sheets
+      // Find row in Google Sheets
       const res = await client.sheets.spreadsheets.values.get({
         spreadsheetId: client.sheetId,
-        range: "RefundRequests!A:A",
+        range: "RefundRequests!A:K",
       });
       const rows = res.data.values || [];
       const rowIndex = rows.findIndex((r) => r[0] === refundId);
 
       if (rowIndex !== -1) {
+        const row = rows[rowIndex];
         const rowNumber = rowIndex + 1; // 1-based index
         const eligibility = newAdminStatus === "APPROVED" ? "Approved" : "Rejected";
         const approvedAtVal = newAdminStatus === "APPROVED" ? now : "";
@@ -624,17 +596,38 @@ export async function updateRefundStatus(
           range: `RefundRequests!H${rowNumber}:K${rowNumber}`,
           valueInputOption: "USER_ENTERED",
           requestBody: {
-            values: [[eligibility, newAdminStatus, memoryRefunds[index]?.createdAt || now, approvedAtVal]],
+            values: [[eligibility, newAdminStatus, row[9] || now, approvedAtVal]],
           },
         });
+
+        updatedRefund = {
+          refundId: row[0],
+          orderId: row[1],
+          customerEmail: row[2],
+          productId: row[3],
+          refundAmount: parseFloat(row[4]) || 0,
+          reason: row[5],
+          policyCitation: row[6],
+          eligibilityStatus: eligibility as RefundRequest["eligibilityStatus"],
+          adminStatus: newAdminStatus,
+          createdAt: row[9] || now,
+          approvedAt: approvedAtVal,
+        };
+
+        if (index === -1) {
+          memoryRefunds.unshift(updatedRefund);
+        }
       }
     } catch (err: any) {
       console.error("Failed to update refund in Google Sheets:", err);
     }
   }
 
-  const updated = memoryRefunds.find((r) => r.refundId === refundId);
-  return { success: true, refund: updated };
+  if (!updatedRefund && index !== -1) {
+    updatedRefund = memoryRefunds[index];
+  }
+
+  return { success: !!updatedRefund, refund: updatedRefund };
 }
 
 export async function logCustomerInteraction(log: Omit<InteractionLog, "interactionId" | "timestamp">): Promise<void> {

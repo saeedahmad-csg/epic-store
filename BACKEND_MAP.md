@@ -13,6 +13,7 @@
   - `GEMINI_API_KEY`: API key for Google GenAI SDK
   - `GEMINI_MODEL`: Model identifier (e.g. `gemini-3.5-flash` or `gemini-2.5-flash`)
   - `GEMINI_THINKING_BUDGET`: Thinking budget for low-latency response (`0`)
+  - `ADMIN_SECRET_KEY`: Shared secret key protecting administrative routes (`/api/admin`, `/api/refunds`, `/api/policy`)
   - `GOOGLE_SERVICE_ACCOUNT_EMAIL`: Google Service Account email for Sheets access
   - `GOOGLE_PRIVATE_KEY`: Private RSA key for Sheets JWT authentication
   - `GOOGLE_SHEET_ID`: Target Google Spreadsheet ID
@@ -41,6 +42,10 @@
 ---
 
 ## 3. Services & Business Logic
+
+### `src/lib/adminAuth.ts`
+- [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L8-L23)
+  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` via `x-admin-key` header or `?adminKey=` query parameter. In local development, safely falls back when key is unset.
 
 ### `src/lib/gemini.ts`
 - [`sanitizePaymentMethod(method?: string): string`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L18-L24)

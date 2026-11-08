@@ -47,6 +47,7 @@ export default function ChatWidget({ isOpen, onClose, initialPrompt }: ChatWidge
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [activeTool, setActiveTool] = useState<string | null>(null);
+  const [usedChips, setUsedChips] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load conversation memory from localStorage on initial mount
@@ -159,6 +160,7 @@ export default function ChatWidget({ isOpen, onClose, initialPrompt }: ChatWidge
     } catch (e) {
       console.warn("Could not clear localStorage:", e);
     }
+    setUsedChips([]);
     setMessages([
       {
         id: "welcome-reset",
@@ -249,79 +251,71 @@ export default function ChatWidget({ isOpen, onClose, initialPrompt }: ChatWidge
 
                 {/* Refund Card Badge if present */}
                 {msg.refundData && (
-                  <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-indigo-200/60 text-slate-800 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-mono font-bold text-indigo-700 flex items-center space-x-1">
-                        <Receipt className="w-3.5 h-3.5" />
-                        <span>{msg.refundData.refundId}</span>
-                      </span>
-                      <span
-                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full flex items-center space-x-1 ${
-                          msg.refundData.adminStatus === "APPROVED"
-                            ? "bg-emerald-100 text-emerald-800"
-                            : msg.refundData.isEligible
-                            ? "bg-amber-100 text-amber-800"
-                            : "bg-rose-100 text-rose-800"
-                        }`}
-                      >
-                        {msg.refundData.adminStatus === "APPROVED" ? (
-                          <>
-                            <CheckCircle2 className="w-3 h-3" />
-                            <span>APPROVED</span>
-                          </>
-                        ) : msg.refundData.isEligible ? (
-                          <>
-                            <Clock className="w-3 h-3" />
-                            <span>PENDING ADMIN REVIEW</span>
-                          </>
-                        ) : (
-                          <>
-                            <AlertCircle className="w-3 h-3" />
-                            <span>INELIGIBLE</span>
-                          </>
-                        )}
-                      </span>
-                    </div>
+                  msg.refundData.isEligible ? (
+                    <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-indigo-200/60 text-slate-800 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-mono font-bold text-indigo-700 flex items-center space-x-1">
+                          <Receipt className="w-3.5 h-3.5" />
+                          <span>{msg.refundData.refundId}</span>
+                        </span>
+                        <span
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full flex items-center space-x-1 ${
+                            msg.refundData.adminStatus === "APPROVED"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {msg.refundData.adminStatus === "APPROVED" ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>Approved</span>
+                            </>
+                          ) : (
+                            <>
+                              <Clock className="w-3 h-3" />
+                              <span>Pending Review</span>
+                            </>
+                          )}
+                        </span>
+                      </div>
 
-                    <div className="text-xs pt-1 border-t border-slate-200/70 flex items-baseline justify-between">
-                      <span className="text-slate-500">Refund Amount:</span>
-                      <span className="font-bold text-slate-900 text-sm">
-                        ${msg.refundData.refundAmount?.toFixed(2) || "0.00"}
-                      </span>
-                    </div>
+                      <div className="text-xs pt-1 border-t border-slate-200/70 flex items-baseline justify-between">
+                        <span className="text-slate-500">Refund Amount:</span>
+                        <span className="font-bold text-slate-900 text-sm">
+                          ${msg.refundData.refundAmount?.toFixed(2) || "0.00"}
+                        </span>
+                      </div>
 
-                    {msg.refundData.policyCitation && (
-                      <div className="text-[11px] text-slate-700 bg-white p-2.5 rounded-xl border border-indigo-200/80 space-y-1 shadow-2xs">
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-slate-900 flex items-center space-x-1">
+                      {msg.refundData.policyCitation && (
+                        <div className="text-[11px] text-slate-700 bg-white p-2.5 rounded-xl border border-indigo-200/80 space-y-1 shadow-2xs">
+                          <div className="flex items-center space-x-1 font-semibold text-slate-900">
                             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>Strict Policy Grounding:</span>
-                          </span>
-                          <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
-                            Clause Verified ✓
-                          </span>
+                            <span>Store Policy Verified</span>
+                          </div>
+                          <p className="text-slate-600 font-sans text-[11px] leading-relaxed pt-0.5">
+                            {msg.refundData.policyCitation}
+                          </p>
                         </div>
-                        <p className="text-slate-600 font-sans text-[11px] leading-relaxed pt-0.5">
+                      )}
+                    </div>
+                  ) : (
+                    <div className="mt-3 p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-slate-800 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-rose-900 flex items-center space-x-1.5">
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                          <span>Store Policy Notice</span>
+                        </span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">
+                          Ineligible for Return
+                        </span>
+                      </div>
+                      {msg.refundData.policyCitation && (
+                        <p className="text-slate-600 text-[11px] leading-relaxed pt-1.5 border-t border-rose-200/60 font-sans">
                           {msg.refundData.policyCitation}
                         </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Tool calls badges */}
-                {msg.toolCalls && msg.toolCalls.length > 0 && (
-                  <div className="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap gap-1">
-                    {msg.toolCalls.map((t, idx) => (
-                      <span
-                        key={idx}
-                        className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center space-x-1"
-                      >
-                        <span>⚙️</span>
-                        <span>{t}</span>
-                      </span>
-                    ))}
-                  </div>
+                      )}
+                    </div>
+                  )
                 )}
               </div>
             </div>
@@ -340,25 +334,36 @@ export default function ChatWidget({ isOpen, onClose, initialPrompt }: ChatWidge
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Quick Prompt Suggestion Chips */}
-      <div className="px-3 py-2 bg-white border-t border-slate-100 overflow-x-auto flex space-x-1.5 no-scrollbar shrink-0">
-        {[
+      {/* Quick Prompt Suggestion Chips (auto-hide clicked chips) */}
+      {(() => {
+        const availableChips = [
           { label: "🔥 Top Deals", prompt: "What discounts do you have right now?" },
           { label: "📦 Track ORD-1001", prompt: "Where is my order ORD-1001?" },
           { label: "🛡️ Refund ORD-1003", prompt: "Can I get a refund for ORD-1003? The smartwatch screen arrived cracked." },
           { label: "🎧 Earbuds Policy", prompt: "Can I return opened wireless earbuds?" },
           { label: "👑 Gold Tier Perk", prompt: "What is the return window for Gold tier members?" },
-        ].map((chip, idx) => (
-          <button
-            key={idx}
-            disabled={loading}
-            onClick={() => handleSendMessage(chip.prompt)}
-            className="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-full bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-700 border border-slate-200 transition-colors"
-          >
-            {chip.label}
-          </button>
-        ))}
-      </div>
+        ].filter((chip) => !usedChips.includes(chip.label));
+
+        if (availableChips.length === 0) return null;
+
+        return (
+          <div className="px-3 py-2 bg-white border-t border-slate-100 overflow-x-auto flex space-x-1.5 no-scrollbar shrink-0">
+            {availableChips.map((chip, idx) => (
+              <button
+                key={idx}
+                disabled={loading}
+                onClick={() => {
+                  setUsedChips((prev) => [...prev, chip.label]);
+                  handleSendMessage(chip.prompt);
+                }}
+                className="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-full bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-700 border border-slate-200 transition-colors"
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Input Form */}
       <form

@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   } catch (err: any) {
     console.error("Error in /api/chat:", err);
     return NextResponse.json(
-      { error: err.message || "Internal server error occurred in chat agent." },
+      { error: "An internal server error occurred in chat agent. Please try again shortly." },
       { status: 500 }
     );
   }
