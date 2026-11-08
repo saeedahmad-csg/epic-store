@@ -118,7 +118,7 @@ const toolsDeclarations: any[] = [
 /**
  * Execute tool calls locally against Google Sheets, Policy engine, and Email service
  */
-async function executeTool(name: string, args: any): Promise<any> {
+async function executeTool(name: string, args: any, sessionEmail?: string): Promise<any> {
   console.log(`🛠️ Executing Agent Tool: ${name}`, args);
 
   if (name === "search_products") {
@@ -149,12 +149,26 @@ async function executeTool(name: string, args: any): Promise<any> {
       const customer = await getCustomerByEmail(order.customerEmail);
       const cardLast4 = extractCardLast4(order.paymentMethod);
       const sanitizedPayment = sanitizePaymentMethod(order.paymentMethod);
+
+      // Server-side authorization check:
+      const requestingEmail = (args.customerEmail || sessionEmail || "").trim().toLowerCase();
+      const isOwner = requestingEmail && requestingEmail === order.customerEmail.toLowerCase();
+      const isVerified = isOwner || args.isVerified === true;
+
       return {
         found: true,
         order: {
-          ...order,
-          paymentMethod: sanitizedPayment,
+          orderId: order.orderId,
+          productName: order.productName,
+          quantity: order.quantity,
+          orderStatus: order.orderStatus,
+          deliveryDate: order.deliveryDate,
+          customerName: isVerified ? order.customerName : `${order.customerName.split(" ")[0]}***`,
+          customerEmail: isVerified ? order.customerEmail : "Protected",
+          totalAmount: isVerified ? `$${order.totalAmount.toFixed(2)}` : "Verification required",
+          paymentMethod: isVerified ? sanitizedPayment : "Protected",
           customerTier: customer?.loyaltyTier || "Bronze",
+          requiresVerification: !isVerified,
         },
       };
     } else if (args.customerQuery) {
@@ -165,17 +179,15 @@ async function executeTool(name: string, args: any): Promise<any> {
       return {
         found: true,
         count: orders.length,
+        requiresVerification: true,
         orders: orders.map((o) => ({
           orderId: o.orderId,
-          customerName: o.customerName,
-          customerEmail: o.customerEmail,
           productName: o.productName,
-          quantity: o.quantity,
-          totalAmount: `$${o.totalAmount.toFixed(2)}`,
-          paymentMethod: sanitizePaymentMethod(o.paymentMethod),
           orderStatus: o.orderStatus,
           deliveryDate: o.deliveryDate,
+          customerName: `${o.customerName.split(" ")[0]}***`,
         })),
+        verificationPrompt: "Account located. Please verify checkout email or last 4 card digits to access full details.",
       };
     } else {
       return { found: false, message: "Please provide either an orderId (e.g. ORD-1001) or a customer name/email." };
@@ -208,8 +220,21 @@ async function executeTool(name: string, args: any): Promise<any> {
       return { success: false, message: `Cannot process refund: Order #${args.orderId} does not exist.` };
     }
 
-    const customer = await getCustomerByEmail(args.customerEmail || order.customerEmail);
-    const policies = await getCompanyPolicies();
+    // Server-Side Authorization: Customer identity and tier are bound strictly to order.customerEmail from database
+    const customer = await getCustomerByEmail(order.customerEmail);
+
+    // If client supplied an email, verify it actually matches the order owner
+    if (args.customerEmail && args.customerEmail.trim().toLowerCase() !== order.customerEmail.toLowerCase()) {
+      return {
+        success: false,
+        isEligible: false,
+        message: `Security Authorization Failed: Provided email "${args.customerEmail}" does not match the registered owner of Order #${order.orderId}.`,
+      };
+    }
+
+    // Load live Word (.docx) policies dynamically
+    const { clauses } = await getCompanyPolicies();
+    const findClause = (secId: string) => clauses.find((c) => c.sectionId === secId || c.sectionId.startsWith(secId));
 
     // Calculate days since delivery
     let daysSinceDelivery = 999;
@@ -219,57 +244,111 @@ async function executeTool(name: string, args: any): Promise<any> {
       daysSinceDelivery = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     }
 
+    // Dynamic Policy Evaluation driven by company_policies.docx clauses
     const isGold = customer?.loyaltyTier === "Gold";
-    const allowedDays = isGold ? 45 : 30;
+    const goldClause = findClause("SEC-2.4");
+    const stdWindowClause = findClause("SEC-2.1");
+    const openedAccClause = findClause("SEC-2.2");
+    const doaClause = findClause("SEC-3.1");
+    const unopenedClause = findClause("SEC-3.2");
+    const openedGoodsClause = findClause("SEC-3.3");
+    const damageClause = findClause("SEC-3.4");
+    const digitalClause = findClause("SEC-4.1");
+    const hygieneClause = findClause("SEC-4.2");
+    const clearanceClause = findClause("SEC-2.3");
+
+    // Dynamically derive allowed return window from Word document clauses
+    let allowedDays = 30;
+    if (isGold && goldClause) {
+      const match = goldClause.content.match(/(\d+)\s*days/i);
+      allowedDays = match ? parseInt(match[1], 10) : 45;
+    } else if (order.category.toLowerCase().includes("accessories") && openedAccClause) {
+      const match = openedAccClause.content.match(/(\d+)\s*days/i);
+      allowedDays = match ? parseInt(match[1], 10) : 14;
+    } else if (stdWindowClause) {
+      const match = stdWindowClause.content.match(/(\d+)\s*days/i);
+      allowedDays = match ? parseInt(match[1], 10) : 30;
+    }
+
+    // Dynamic Restocking Fee from Word document
+    let standardRestockingFee = 5.0;
+    if (openedGoodsClause) {
+      const feeMatch = openedGoodsClause.content.match(/\$(\d+(\.\d{2})?)/);
+      if (feeMatch) standardRestockingFee = parseFloat(feeMatch[1]);
+    }
 
     let eligible = true;
     let refundAmount = order.totalAmount;
     let citation = "";
     let reasonDetail = args.reason;
 
-    // Check delivery status
+    // 1. Delivery Check (SEC-1)
     if (order.orderStatus !== "Delivered") {
       eligible = false;
-      citation = "[SEC-1: Overview & General Policy] Item has not been delivered yet. Active order cancellation is required instead.";
+      const sec1 = findClause("SEC-1");
+      citation = `[${sec1?.sectionId || "SEC-1"}: ${sec1?.title || "General Policy"}] Order status is ${order.orderStatus}. Items must be delivered before initiating a return refund.`;
     }
-    // Check digital items (Strictly non-refundable, no exceptions)
-    else if (order.productId === "PROD-107") {
+    // 2. Digital / Gift Card Exclusion (SEC-4.1)
+    else if (
+      digitalClause &&
+      (order.productName.toLowerCase().includes("gift card") ||
+        order.productName.toLowerCase().includes("software") ||
+        order.category.toLowerCase().includes("digital") ||
+        order.productId === "PROD-107")
+    ) {
       eligible = false;
-      citation = "[SEC-4.1: Digital Items & Gift Cards] Digital products, electronic gift cards, and software licenses are strictly non-refundable once delivered.";
+      citation = `[${digitalClause.sectionId}: ${digitalClause.title}] ${digitalClause.summary || digitalClause.content}`;
     }
-    // Check clearance / final sale (DOA exception applies under Sec 2.3 & 3.1)
-    else if (order.productId === "PROD-108") {
+    // 3. Hygiene Electronics Exclusion (SEC-4.2)
+    else if (
+      hygieneClause &&
+      (order.productName.toLowerCase().includes("earbud") || order.description.toLowerCase().includes("in-ear")) &&
+      args.condition !== "unopened_change_of_mind" &&
+      args.condition !== "defective_on_arrival"
+    ) {
+      eligible = false;
+      citation = `[${hygieneClause.sectionId}: ${hygieneClause.title}] ${hygieneClause.summary || hygieneClause.content}`;
+    }
+    // 4. Clearance / Final Sale (SEC-2.3)
+    else if (
+      clearanceClause &&
+      (order.productName.toLowerCase().includes("clearance") || order.productId === "PROD-108")
+    ) {
       if (args.condition !== "defective_on_arrival") {
         eligible = false;
-        citation = "[SEC-2.3: Final Sale & Clearance] Clearance and final sale items are non-refundable unless verified defective on arrival.";
+        citation = `[${clearanceClause.sectionId}: ${clearanceClause.title}] ${clearanceClause.summary || clearanceClause.content}`;
       } else {
-        citation = "[SEC-2.3 Exception & SEC-3.1] Final Sale item accepted due to verified Defective on Arrival (DOA).";
+        citation = `[${clearanceClause.sectionId} Exception & ${doaClause?.sectionId || "SEC-3.1"}] Final Sale item eligible under verified Defective on Arrival (DOA) protection.`;
       }
     }
-    // Check accidental damage
-    else if (args.condition === "accidental_damage") {
+    // 5. Accidental Damage Exclusion (SEC-3.4)
+    else if (args.condition === "accidental_damage" && damageClause) {
       eligible = false;
-      citation = "[SEC-3.4: Accidental Damage] Accidental damage, liquid spills, and customer misuse are strictly ineligible for return refunds.";
+      citation = `[${damageClause.sectionId}: ${damageClause.title}] ${damageClause.summary || damageClause.content}`;
     }
-    // Check return window
+    // 6. Return Window Check (SEC-2.1 & SEC-2.4)
     else if (daysSinceDelivery > allowedDays) {
       eligible = false;
-      citation = `[SEC-2.1 & SEC-2.4: Return Windows] Exceeded return window (${daysSinceDelivery} days since delivery; maximum allowed is ${allowedDays} days for ${customer?.loyaltyTier || "standard"} tier).`;
+      const activeWindowClause = isGold ? goldClause : stdWindowClause;
+      citation = `[${activeWindowClause?.sectionId || "SEC-2.1"}: ${activeWindowClause?.title || "Return Window"}] Exceeded return window (${daysSinceDelivery} days since delivery; maximum allowed is ${allowedDays} days for ${customer?.loyaltyTier || "standard"} tier).`;
     }
-    // Opened goods fee
+    // 7. Opened Goods Condition (SEC-3.3 & SEC-2.4 Tier Waiver)
     else if (args.condition === "opened_working") {
-      const restockingFee = isGold ? 0 : 5.0;
+      const restockingFee = isGold ? 0 : standardRestockingFee;
       refundAmount = Math.max(0, order.totalAmount - restockingFee);
-      citation = isGold
-        ? "[SEC-2.4: Loyalty Tier Extension] Gold Tier perk applied: $5 restocking fee waived under Section 2.4. 100% full refund granted."
-        : "[SEC-3.3: Opened Goods] Opened goods in working condition eligible minus standard $5.00 restocking fee.";
+      citation = isGold && goldClause
+        ? `[${goldClause.sectionId}: ${goldClause.title}] Gold Tier perk applied: standard $${standardRestockingFee.toFixed(2)} restocking fee waived. 100% full refund approved.`
+        : `[${openedGoodsClause?.sectionId || "SEC-3.3"}: ${openedGoodsClause?.title || "Opened Goods"}] Opened goods eligible minus standard $${standardRestockingFee.toFixed(2)} restocking fee.`;
     }
-    // DOA
-    else if (args.condition === "defective_on_arrival") {
+    // 8. Defective on Arrival (SEC-3.1)
+    else if (args.condition === "defective_on_arrival" && doaClause) {
       refundAmount = order.totalAmount;
-      citation = "[SEC-3.1: Defective on Arrival] 100% full refund + complimentary return shipping label.";
-    } else {
-      citation = "[SEC-3.2: Unopened Items] Unopened item within return window - 100% full product refund.";
+      citation = `[${doaClause.sectionId}: ${doaClause.title}] 100% full refund + complimentary prepaid return shipping label.`;
+    }
+    // 9. Unopened / Change of Mind (SEC-3.2)
+    else {
+      refundAmount = order.totalAmount;
+      citation = `[${unopenedClause?.sectionId || "SEC-3.2"}: ${unopenedClause?.title || "Unopened Items"}] Unopened item within return window: 100% full product refund.`;
     }
 
     const adminStatus = runtimeSettings.autoApproveRefunds && eligible ? "APPROVED" : "PENDING";
@@ -286,7 +365,6 @@ async function executeTool(name: string, args: any): Promise<any> {
       adminStatus,
     });
 
-    // If auto-approved, trigger confirmation email immediately
     if (adminStatus === "APPROVED") {
       await sendRefundConfirmationEmail({
         customerEmail: order.customerEmail,
@@ -307,11 +385,15 @@ async function executeTool(name: string, args: any): Promise<any> {
       policyCitation: citation,
       adminStatus,
       eligibilityStatus,
+      persistedToSheets: savedRefund.persistedToSheets,
       requiresAdminApproval: adminStatus === "PENDING",
       daysSinceDelivery,
       allowedReturnWindow: allowedDays,
     };
   }
+
+  throw new Error(`Unknown tool: ${name}`);
+}
 
   throw new Error(`Unknown tool: ${name}`);
 }
@@ -407,7 +489,7 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
       const toolName = call.name || "unknown_tool";
       toolCallsLog.push(toolName);
 
-      const toolResult = await executeTool(toolName, call.args);
+      const toolResult = await executeTool(toolName, call.args, customerEmail);
       if (toolName === "evaluate_and_submit_refund") {
         detectedRefundData = toolResult;
       }
@@ -613,12 +695,16 @@ async function simulateAgentResponse(
         ? "accidental_damage"
         : "opened_working";
 
-      const evalResult = await executeTool("evaluate_and_submit_refund", {
-        orderId: specificOrderId,
-        customerEmail: detectedEmail || customerEmail || "customer@example.com",
-        reason: query,
-        condition,
-      });
+      const evalResult = await executeTool(
+        "evaluate_and_submit_refund",
+        {
+          orderId: specificOrderId,
+          customerEmail: detectedEmail || customerEmail || "customer@example.com",
+          reason: query,
+          condition,
+        },
+        customerEmail
+      );
       refundData = evalResult;
 
       if (evalResult.isEligible) {

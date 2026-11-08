@@ -192,7 +192,14 @@ export default function AdminPage() {
           spread: 60,
           origin: { y: 0.6 },
         });
-        showSuccess(`Refund ${refundId} approved and confirmation email sent.`);
+        const emailMode = data.emailDispatched?.mode;
+        if (emailMode === "LIVE_SMTP") {
+          showSuccess(`Refund ${refundId} approved and live email sent to customer inbox.`);
+        } else if (emailMode === "SMTP_FAILED") {
+          showSuccess(`Refund ${refundId} approved (SMTP delivery failed; receipt recorded in Email Viewer).`);
+        } else {
+          showSuccess(`Refund ${refundId} approved and receipt recorded in Dispatch Viewer.`);
+        }
       } else {
         showSuccess(`Refund ${refundId} rejected.`);
       }

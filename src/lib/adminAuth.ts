@@ -8,7 +8,10 @@ import { NextRequest, NextResponse } from "next/server";
 export function requireAdminKey(req?: Request | NextRequest | null): NextResponse | null {
   const adminKey = process.env.ADMIN_SECRET_KEY;
   if (!adminKey || adminKey.trim() === "") {
-    return null; // Development mode / key not configured
+    return NextResponse.json(
+      { error: "Unauthorized: ADMIN_SECRET_KEY is not configured on the server. Access denied." },
+      { status: 401 }
+    );
   }
 
   if (!req) {

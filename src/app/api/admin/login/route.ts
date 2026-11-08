@@ -12,9 +12,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const envEmail = (process.env.ADMIN_EMAIL || "admin@apexstore.com").trim().toLowerCase();
-    const envPassword = (process.env.ADMIN_PASSWORD || "admin123").trim();
-    const envSecretKey = (process.env.ADMIN_SECRET_KEY || envPassword).trim();
+    const envEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const envPassword = process.env.ADMIN_PASSWORD?.trim();
+    const envSecretKey = (process.env.ADMIN_SECRET_KEY || envPassword)?.trim();
+
+    if (!envEmail || !envPassword) {
+      return NextResponse.json(
+        { error: "Server error: Admin credentials are not configured in server environment." },
+        { status: 500 }
+      );
+    }
 
     const inputEmail = String(email).trim().toLowerCase();
     const inputPassword = String(password).trim();

@@ -48,10 +48,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    let emailResult = null;
     if (newAdminStatus === "APPROVED") {
       const order = await getOrderById(updateRes.refund.orderId);
-      // Run email dispatch asynchronously in background so SMTP network timeouts never block the admin UI
-      sendRefundConfirmationEmail({
+      emailResult = await sendRefundConfirmationEmail({
         customerEmail: updateRes.refund.customerEmail,
         customerName: order?.customerName || "Customer",
         refundId: updateRes.refund.refundId,
@@ -59,12 +59,13 @@ export async function POST(req: NextRequest) {
         productName: order?.productName || updateRes.refund.productId,
         amount: updateRes.refund.refundAmount,
         reason: updateRes.refund.reason,
-      }).catch((err) => console.warn("Background refund email dispatch warning:", err));
+      });
     }
 
     return NextResponse.json({
       success: true,
       refund: updateRes.refund,
+      emailDispatched: emailResult,
     });
   } catch (err: any) {
     console.error("Error in /api/refunds POST:", err);

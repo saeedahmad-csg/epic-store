@@ -131,13 +131,16 @@ export async function sendRefundConfirmationEmail(params: {
   const port = parseInt(process.env.SMTP_PORT || "587", 10);
   const from = process.env.SMTP_FROM || '"ApexStore Support" <support@apexstore.demo>';
 
-  if (host && user && pass) {
+  if (host && user && pass && pass !== "your-app-password" && user !== "support@yourdomain.com") {
     try {
       const transporter = nodemailer.createTransport({
         host,
         port,
         secure: port === 465,
         requireTLS: port !== 465,
+        connectionTimeout: 4000,
+        greetingTimeout: 3000,
+        socketTimeout: 4000,
         tls: { rejectUnauthorized: true },
         auth: { user, pass },
       });
@@ -165,7 +168,21 @@ export async function sendRefundConfirmationEmail(params: {
       emailDispatchLog.unshift(record);
       return { success: true, messageId: info.messageId, mode: "LIVE_SMTP" };
     } catch (err: any) {
-      console.error("Live SMTP send failed, falling back to recorded dispatch:", err);
+      console.error("Live SMTP send failed:", err.message);
+      const failedRecord: SentEmailRecord = {
+        id: emailId,
+        recipient: params.customerEmail,
+        subject,
+        refundId: params.refundId,
+        orderId: params.orderId,
+        amount: params.amount,
+        htmlContent: html,
+        sentAt: new Date().toISOString(),
+        status: "FAILED",
+        transportInfo: `SMTP Delivery Failed: ${err.message}`,
+      };
+      emailDispatchLog.unshift(failedRecord);
+      return { success: false, error: err.message, mode: "SMTP_FAILED" };
     }
   }
 
@@ -180,8 +197,11 @@ export async function sendRefundConfirmationEmail(params: {
     htmlContent: html,
     sentAt: new Date().toISOString(),
     status: "TEST_DISPATCHED",
-    transportInfo: "Logged in-app Dispatcher (Configure SMTP_HOST in .env.local for external delivery)",
+    transportInfo: "Logged in-app Dispatcher (No active external SMTP credentials)",
   };
+
+  emailDispatchLog.unshift(record);
+  return { success: true, messageId: emailId, mode: "LOCAL_DISPATCH_LOG" };
 
   emailDispatchLog.unshift(record);
   console.log(`📧 Dispatched Refund Email [${record.id}] to ${record.recipient} for Refund ${params.refundId}`);

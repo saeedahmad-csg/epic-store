@@ -335,7 +335,7 @@ export async function getProducts(forceRefresh = false): Promise<Product[]> {
   try {
     const res = await client.sheets.spreadsheets.values.get({
       spreadsheetId: client.sheetId,
-      range: "Products!A2:H",
+      range: "Products!A2:I",
     });
 
     const rows = res.data.values || [];
@@ -508,16 +508,18 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
   }
 }
 
-export async function createRefundRequest(refund: Omit<RefundRequest, "refundId" | "createdAt" | "approvedAt">): Promise<RefundRequest> {
+export async function createRefundRequest(refund: Omit<RefundRequest, "refundId" | "createdAt" | "approvedAt">): Promise<RefundRequest & { persistedToSheets: boolean }> {
   const refundId = `REF-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
   const createdAt = new Date().toISOString();
   const approvedAt = refund.adminStatus === "APPROVED" ? createdAt : "";
 
-  const newRefund: RefundRequest = {
+  let persistedToSheets = false;
+  const newRefund: RefundRequest & { persistedToSheets: boolean } = {
     ...refund,
     refundId,
     createdAt,
     approvedAt,
+    persistedToSheets: false,
   };
 
   memoryRefunds.unshift(newRefund);
@@ -547,6 +549,8 @@ export async function createRefundRequest(refund: Omit<RefundRequest, "refundId"
           ],
         },
       });
+      persistedToSheets = true;
+      newRefund.persistedToSheets = true;
     } catch (err) {
       console.error("Failed to append refund to Google Sheets:", err);
     }

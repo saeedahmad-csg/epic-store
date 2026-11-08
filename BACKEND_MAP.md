@@ -45,7 +45,7 @@
 
 ### `src/lib/adminAuth.ts`
 - [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L8-L23)
-  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` via `x-admin-key` header or `?adminKey=` query parameter. In local development, safely falls back when key is unset.
+  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` via `x-admin-key` header or `?adminKey=` query parameter. Fails closed with 401 Unauthorized if `ADMIN_SECRET_KEY` is missing or invalid.
 
 ### `src/lib/gemini.ts`
 - [`sanitizePaymentMethod(method?: string): string`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L18-L24)
