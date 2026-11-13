@@ -714,10 +714,12 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
       return sr;
     });
 
-    // Background outbox sync: attempt to flush any unpersisted durable refunds to Google Sheets
-    if (unpersistedFromMemory.length > 0) {
+    // Background outbox sync: attempt to flush any unpersisted durable refunds to Google Sheets.
+    // Only process items not yet flagged as synced to prevent duplicate Sheets rows.
+    const pendingSync = unpersistedFromMemory.filter((r) => !(r as any).persistedToSheets);
+    if (pendingSync.length > 0) {
       (async () => {
-        for (const item of unpersistedFromMemory) {
+        for (const item of pendingSync) {
           try {
             await client.sheets.spreadsheets.values.append({
               spreadsheetId: client.sheetId,
@@ -752,7 +754,6 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
         }
       })().catch(() => {});
     }
-
     return [...unpersistedFromMemory, ...mergedSheetRefunds];
   } catch (err) {
     return memoryRefunds;
@@ -794,7 +795,7 @@ export async function updateRefundEmailStatus(
 }
 
 export async function createRefundRequest(refund: Omit<RefundRequest, "refundId" | "createdAt" | "approvedAt">): Promise<RefundRequest & { persistedToSheets: boolean }> {
-  const refundId = `REF-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+  const refundId = `REF-${new Date().getFullYear()}-${crypto.randomBytes(6).toString("hex")}`;
   const createdAt = new Date().toISOString();
   const approvedAt = refund.adminStatus === "APPROVED" ? createdAt : "";
 

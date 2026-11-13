@@ -13,7 +13,7 @@ import {
   verifyCustomerOtp,
   isCustomerSessionValid,
 } from "./googleSheets";
-import { getCompanyPolicies, searchPolicyRAG, validatePolicyIntegrity } from "./policies";
+import { getCompanyPolicies, searchPolicyRAG, validatePolicyIntegrity, parsePolicyThresholds } from "./policies";
 import { sendRefundConfirmationEmail, sendCustomerOtpEmail } from "./email";
 
 /**
@@ -152,7 +152,7 @@ const toolsDeclarations: any[] = [
           description: "Condition of the item: 'defective_on_arrival', 'unopened_change_of_mind', 'opened_working', or 'accidental_damage'.",
         },
       },
-      required: ["orderId", "customerEmail", "reason", "condition"],
+      required: ["orderId", "reason", "condition"],
     },
   },
 ];
@@ -291,7 +291,9 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
 
       return {
         found: true,
-        sessionToken: otpResult.sessionToken || providedSessionToken,
+        // sessionToken is intentionally NOT included in the tool result returned to the model.
+        // It is handled server-side only. The model must call evaluate_and_submit_refund with
+        // the otpCode so the backend can re-derive or reuse the session internally.
         order: {
           orderId: order.orderId,
           orderStatus: order.orderStatus,
@@ -305,6 +307,9 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
           customerTier: customer?.loyaltyTier || "Bronze",
           requiresVerification: false,
         },
+        // Internal-only: pass the session token back through the executeTool return value
+        // so the simulator path can forward it, but it is stripped before Gemini sees it.
+        _internalSessionToken: otpResult.sessionToken || providedSessionToken,
       };
     } else if (args.customerQuery) {
       const orders = await findOrdersByCustomerNameOrEmail(args.customerQuery);
@@ -418,6 +423,10 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
 
     const findClause = (secId: string) => clauses.find((c) => c.sectionId === secId || c.sectionId.startsWith(secId));
 
+    // Parse authoritative thresholds directly from the uploaded policy document.
+    // These values are used for every eligibility decision — no hardcoded overrides.
+    const policyThresholds = parsePolicyThresholds(clauses);
+
     // Calculate days since delivery
     let daysSinceDelivery = 999;
     if (order.deliveryDate && order.deliveryDate !== "Pending Delivery") {
@@ -442,29 +451,22 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     const hygieneClause = findClause("SEC-4.2");
     const clearanceClause = findClause("SEC-2.3");
 
-    // Dynamically derive allowed return window from Word document clauses
-    // Note: Section 2.2 restricts accessories & peripherals to 14 days ONLY if opened; unopened accessories get standard 30 days
+    // Allowed return window uses document-parsed values; no magic number fallbacks.
+    // Note: Section 2.2 restricts accessories & peripherals to openedAccessoryDays ONLY if opened.
     const isOpenedAccessory =
       (productCategory.includes("accessories") || productCategory.includes("peripheral")) &&
       args.condition === "opened_working";
-    let allowedDays = 30;
-    if (isGold && goldClause) {
-      const match = goldClause.content.match(/(\d+)\s*days/i);
-      allowedDays = match ? parseInt(match[1], 10) : 45;
-    } else if (isOpenedAccessory && openedAccClause) {
-      const match = openedAccClause.content.match(/(\d+)\s*days/i);
-      allowedDays = match ? parseInt(match[1], 10) : 14;
-    } else if (stdWindowClause) {
-      const match = stdWindowClause.content.match(/(\d+)\s*days/i);
-      allowedDays = match ? parseInt(match[1], 10) : 30;
+    let allowedDays: number;
+    if (isGold) {
+      allowedDays = policyThresholds.goldTierDays;
+    } else if (isOpenedAccessory) {
+      allowedDays = policyThresholds.openedAccessoryDays;
+    } else {
+      allowedDays = policyThresholds.standardReturnDays;
     }
 
-    // Dynamic Restocking Fee from Word document
-    let standardRestockingFee = 5.0;
-    if (openedGoodsClause) {
-      const feeMatch = openedGoodsClause.content.match(/\$(\d+(\.\d{2})?)/);
-      if (feeMatch) standardRestockingFee = parseFloat(feeMatch[1]);
-    }
+    // Restocking fee sourced from parsed document thresholds
+    const standardRestockingFee = policyThresholds.restockingFee;
 
     let eligible = true;
     let refundAmount = order.totalAmount;
@@ -520,10 +522,10 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
       eligible = false;
       citation = `[${damageClause.sectionId}: ${damageClause.title}] ${damageClause.summary || damageClause.content}`;
     }
-    // 6. Defective on Arrival 14-Day Limit (SEC-3.1): Must be reported within 14 calendar days of delivery
-    else if (args.condition === "defective_on_arrival" && daysSinceDelivery > 14) {
+    // 6. Defective on Arrival DOA Limit (SEC-3.1): Must be reported within document-specified calendar days of delivery
+    else if (args.condition === "defective_on_arrival" && daysSinceDelivery > policyThresholds.doaReportingDays) {
       eligible = false;
-      citation = `[${doaClause?.sectionId || "SEC-3.1"}: ${doaClause?.title || "DOA Protection"}] Defective on Arrival claims must be reported within 14 calendar days of delivery (${daysSinceDelivery} days elapsed). Item falls under manufacturer warranty repair rather than return refund.`;
+      citation = `[${doaClause?.sectionId || "SEC-3.1"}: ${doaClause?.title || "DOA Protection"}] Defective on Arrival claims must be reported within ${policyThresholds.doaReportingDays} calendar days of delivery (${daysSinceDelivery} days elapsed). Item falls under manufacturer warranty repair rather than return refund.`;
     }
     // 7. General Return Window Check (SEC-2.1 & SEC-2.4)
     else if (daysSinceDelivery > allowedDays) {
@@ -539,10 +541,10 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         ? `[${openedGoodsClause?.sectionId || "SEC-3.3"} & ${goldClause?.sectionId || "SEC-2.4"}] Opened item in working condition: $${standardRestockingFee.toFixed(2)} restocking fee waived for Apex ${customer?.loyaltyTier} member. 100% full refund approved.`
         : `[${openedGoodsClause?.sectionId || "SEC-3.3"}: ${openedGoodsClause?.title || "Opened Goods"}] Opened goods eligible minus standard $${standardRestockingFee.toFixed(2)} restocking fee.`;
     }
-    // 9. Defective on Arrival within 14 Days (SEC-3.1)
+    // 9. Defective on Arrival within policy window (SEC-3.1)
     else if (args.condition === "defective_on_arrival" && doaClause) {
       refundAmount = order.totalAmount;
-      citation = `[${doaClause.sectionId}: ${doaClause.title}] Defective on Arrival verified within 14 days: 100% full refund with complimentary prepaid return shipping label.`;
+      citation = `[${doaClause.sectionId}: ${doaClause.title}] Defective on Arrival verified within ${policyThresholds.doaReportingDays} days: 100% full refund with complimentary prepaid return shipping label.`;
     }
     // 10. Unopened / Change of Mind (SEC-3.2)
     else {
@@ -697,6 +699,10 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
         detectedRefundData = toolResult;
       }
 
+      // Strip any internal-only fields before they enter Gemini's context window.
+      // Credentials (session tokens) must never be visible to the model.
+      const { _internalSessionToken: _stripped, ...safeToolResult } = toolResult as any;
+
       // Append exact model parts from Gemini including thought signature
       const modelParts = currentResponse.candidates?.[0]?.content?.parts || [{ functionCall: call }];
       contents.push({
@@ -711,7 +717,7 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
             functionResponse: {
               id: (call as any).id,
               name: call.name,
-              response: { result: toolResult },
+              response: { result: safeToolResult },
             },
           },
         ],
@@ -733,15 +739,11 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
         .join("\n") ||
       "";
 
-    // If Gemini returned an empty string or generic placeholder, generate verified answer from simulator
+    // If Gemini returned an empty reply, return a safe neutral message.
+    // Do NOT fall back to simulateAgentResponse here — the simulator has weaker auth
+    // and must only run when the API key is entirely absent (handled above).
     if (!reply.trim() || reply.trim() === "I have processed your request.") {
-      const fallbackResult = await simulateAgentResponse(messages, customerEmail);
-      reply = fallbackResult.reply;
-      if (fallbackResult.toolCalls?.length) {
-        fallbackResult.toolCalls.forEach((t) => {
-          if (!toolCallsLog.includes(t)) toolCallsLog.push(t);
-        });
-      }
+      reply = "I'm sorry, I wasn't able to generate a response. Please try rephrasing your question.";
     }
 
     // Log interaction to Google Sheets in background without blocking response
@@ -933,7 +935,7 @@ async function simulateAgentResponse(
         {
           orderId: specificOrderId,
           otpCode: detectedOtp,
-          sessionToken: lookupResult.sessionToken,
+          sessionToken: lookupResult._internalSessionToken,
           reason: query,
           condition,
         },

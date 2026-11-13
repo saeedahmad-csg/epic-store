@@ -349,6 +349,48 @@ export async function updatePolicyDocument(buffer: Buffer): Promise<{ success: b
 }
 
 /**
+ * Parsed numeric thresholds extracted directly from the policy document clauses.
+ * Used by the refund evaluator so hardcoded fallback numbers never override document values.
+ */
+export interface PolicyThresholds {
+  standardReturnDays: number;
+  openedAccessoryDays: number;
+  goldTierDays: number;
+  doaReportingDays: number;
+  restockingFee: number;
+}
+
+/**
+ * Extracts authoritative numeric thresholds from parsed policy clauses.
+ * Falls back to safe defaults only when a clause is entirely absent from the document.
+ */
+export function parsePolicyThresholds(clauses: PolicyClause[]): PolicyThresholds {
+  const clauseMap = new Map(clauses.map((c) => [c.sectionId, c]));
+
+  const extractDays = (sectionId: string, fallback: number): number => {
+    const clause = clauseMap.get(sectionId);
+    if (!clause) return fallback;
+    const match = clause.content.match(/(\d+)\s*days/i);
+    return match ? parseInt(match[1], 10) : fallback;
+  };
+
+  const extractFee = (sectionId: string, fallback: number): number => {
+    const clause = clauseMap.get(sectionId);
+    if (!clause) return fallback;
+    const match = clause.content.match(/\$(\d+(?:\.\d{2})?)/);
+    return match ? parseFloat(match[1]) : fallback;
+  };
+
+  return {
+    standardReturnDays: extractDays("SEC-2.1", 30),
+    openedAccessoryDays: extractDays("SEC-2.2", 14),
+    goldTierDays: extractDays("SEC-2.4", 45),
+    doaReportingDays: extractDays("SEC-3.1", 14),
+    restockingFee: extractFee("SEC-3.3", 5.0),
+  };
+}
+
+/**
  * Validates that all required core policy clauses are present in the parsed Word document,
  * and ensures that all numeric thresholds (day windows, restocking fee amounts) and semantic rules are intact.
  * If any core clause is missing or corrupted, automated refund decisioning safely yields to manual admin review.
@@ -424,6 +466,24 @@ export function validatePolicyIntegrity(clauses: PolicyClause[]): {
   const sec42 = clauseMap.get("SEC-4.2");
   if (sec42 && !/(hygiene|sanitary|earbud|seal)/i.test(sec42.content)) {
     semanticErrors.push("SEC-4.2 missing sanitary or hygiene packaging terms.");
+  }
+
+  // 8. Cross-validate that extracted numeric values are within sane operational ranges
+  const thresholds = parsePolicyThresholds(clauses);
+  if (thresholds.standardReturnDays < 1 || thresholds.standardReturnDays > 365) {
+    semanticErrors.push(`SEC-2.1 standard return window (${thresholds.standardReturnDays} days) is outside expected range 1-365.`);
+  }
+  if (thresholds.openedAccessoryDays < 1 || thresholds.openedAccessoryDays > 365) {
+    semanticErrors.push(`SEC-2.2 opened accessory window (${thresholds.openedAccessoryDays} days) is outside expected range 1-365.`);
+  }
+  if (thresholds.goldTierDays < 1 || thresholds.goldTierDays > 365) {
+    semanticErrors.push(`SEC-2.4 Gold tier window (${thresholds.goldTierDays} days) is outside expected range 1-365.`);
+  }
+  if (thresholds.doaReportingDays < 1 || thresholds.doaReportingDays > 90) {
+    semanticErrors.push(`SEC-3.1 DOA reporting window (${thresholds.doaReportingDays} days) is outside expected range 1-90.`);
+  }
+  if (thresholds.restockingFee < 0 || thresholds.restockingFee > 500) {
+    semanticErrors.push(`SEC-3.3 restocking fee ($${thresholds.restockingFee}) is outside expected range $0-$500.`);
   }
 
   const valid = missing.length === 0 && semanticErrors.length === 0;
