@@ -102,13 +102,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Keep verified customer credentials in an HttpOnly cookie. The token is
+    // never returned to the browser's JavaScript or exposed to Gemini.
+    const customerSessionToken = req.cookies.get("apex_customer_session")?.value;
+
     // 3. Process with AI Agent
     const result = await processChatWithAgent({
       messages,
       customerEmail,
+      customerSessionToken,
     });
 
-    return NextResponse.json(result);
+    const { customerSessionToken: nextSessionToken, ...publicResult } = result;
+    const response = NextResponse.json(publicResult);
+
+    if (nextSessionToken) {
+      response.cookies.set("apex_customer_session", nextSessionToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/api/chat",
+        maxAge: 15 * 60,
+      });
+    }
+
+    return response;
   } catch (err: any) {
     console.error("Error in /api/chat:", err);
     return NextResponse.json(
