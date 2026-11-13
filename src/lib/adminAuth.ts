@@ -4,7 +4,11 @@ import crypto from "crypto";
 export const ADMIN_COOKIE_NAME = "apex_admin_session";
 
 function getAdminSigningSecret(): string {
-  return process.env.ADMIN_SECRET_KEY || process.env.ADMIN_PASSWORD || "apex-store-secure-signing-secret-key";
+  const secret = process.env.ADMIN_SECRET_KEY || process.env.ADMIN_PASSWORD;
+  if (!secret || secret.trim() === "") {
+    throw new Error("Server security error: ADMIN_SECRET_KEY is not configured in environment.");
+  }
+  return secret.trim();
 }
 
 /**

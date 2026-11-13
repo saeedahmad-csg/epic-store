@@ -33,13 +33,19 @@ function loadDurableRefunds(): RefundRequest[] {
 }
 
 function saveDurableRefunds(refunds: RefundRequest[]): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  const tempFile = `${REFUNDS_FILE}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(REFUNDS_FILE, JSON.stringify(refunds, null, 2), "utf-8");
+    fs.writeFileSync(tempFile, JSON.stringify(refunds, null, 2), "utf-8");
+    fs.renameSync(tempFile, REFUNDS_FILE);
   } catch (err) {
-    console.error("Failed to write durable refunds store:", err);
+    try {
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    } catch {}
+    console.error("Failed to atomically write durable refunds store:", err);
+    throw new Error("Durable storage write failure: unable to persist refund data.");
   }
 }
 
@@ -528,6 +534,9 @@ interface CustomerSession {
 }
 const verifiedCustomerSessions = new Map<string, CustomerSession>();
 
+// Order lockout store: locks order for 5 minutes after 3 consecutive failed verification attempts
+const orderLockoutStore = new Map<string, number>();
+
 export function storeCustomerOtp(orderId: string, email: string): {
   success: boolean;
   otpCode?: string;
@@ -536,6 +545,18 @@ export function storeCustomerOtp(orderId: string, email: string): {
 } {
   const normalizedOrder = orderId.trim().toUpperCase();
   const now = Date.now();
+
+  // Check security lockout
+  const lockoutUntil = orderLockoutStore.get(normalizedOrder);
+  if (lockoutUntil && now < lockoutUntil) {
+    const remainingSecs = Math.ceil((lockoutUntil - now) / 1000);
+    return {
+      success: false,
+      cooldownSeconds: remainingSecs,
+      message: `Order #${normalizedOrder} is temporarily locked due to repeated incorrect codes. Please try again in ${remainingSecs} seconds.`,
+    };
+  }
+
   const existing = customerOtpStore.get(normalizedOrder);
 
   // 60-second cooldown per order to prevent OTP spamming
@@ -568,6 +589,17 @@ export function verifyCustomerOtp(
   code: string
 ): { verified: boolean; email?: string; sessionToken?: string; message?: string } {
   const normalizedOrder = orderId.trim().toUpperCase();
+  const now = Date.now();
+
+  const lockoutUntil = orderLockoutStore.get(normalizedOrder);
+  if (lockoutUntil && now < lockoutUntil) {
+    const remainingSecs = Math.ceil((lockoutUntil - now) / 1000);
+    return {
+      verified: false,
+      message: `Account verification is locked due to security limits. Please try again in ${remainingSecs} seconds.`,
+    };
+  }
+
   const record = customerOtpStore.get(normalizedOrder);
 
   if (!record) {
@@ -577,7 +609,7 @@ export function verifyCustomerOtp(
     };
   }
 
-  if (Date.now() > record.expiresAt) {
+  if (now > record.expiresAt) {
     customerOtpStore.delete(normalizedOrder);
     return {
       verified: false,
@@ -587,9 +619,10 @@ export function verifyCustomerOtp(
 
   if (record.failedAttempts >= 3) {
     customerOtpStore.delete(normalizedOrder);
+    orderLockoutStore.set(normalizedOrder, now + 5 * 60 * 1000);
     return {
       verified: false,
-      message: "Too many failed attempts. For your security, this code has been invalidated. Please request a new code.",
+      message: "Too many failed attempts. For your security, this order is locked for 5 minutes.",
     };
   }
 
@@ -598,9 +631,10 @@ export function verifyCustomerOtp(
     const remaining = 3 - record.failedAttempts;
     if (remaining <= 0) {
       customerOtpStore.delete(normalizedOrder);
+      orderLockoutStore.set(normalizedOrder, now + 5 * 60 * 1000);
       return {
         verified: false,
-        message: "Too many failed attempts. This verification code has been invalidated. Please request a new code.",
+        message: "Too many failed attempts. Verification locked for 5 minutes. Please request a new code later.",
       };
     }
     return {
@@ -679,6 +713,45 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
       }
       return sr;
     });
+
+    // Background outbox sync: attempt to flush any unpersisted durable refunds to Google Sheets
+    if (unpersistedFromMemory.length > 0) {
+      (async () => {
+        for (const item of unpersistedFromMemory) {
+          try {
+            await client.sheets.spreadsheets.values.append({
+              spreadsheetId: client.sheetId,
+              range: "RefundRequests!A:K",
+              valueInputOption: "USER_ENTERED",
+              requestBody: {
+                values: [
+                  [
+                    item.refundId,
+                    item.orderId,
+                    item.customerEmail,
+                    item.productId,
+                    item.refundAmount.toString(),
+                    item.reason,
+                    item.policyCitation,
+                    item.eligibilityStatus,
+                    item.adminStatus,
+                    item.createdAt,
+                    item.approvedAt || "",
+                  ],
+                ],
+              },
+            });
+            const memItem = memoryRefunds.find((r) => r.refundId === item.refundId);
+            if (memItem) {
+              (memItem as any).persistedToSheets = true;
+              saveDurableRefunds(memoryRefunds);
+            }
+          } catch (syncErr) {
+            // Preserved in durable outbox for next sync attempt
+          }
+        }
+      })().catch(() => {});
+    }
 
     return [...unpersistedFromMemory, ...mergedSheetRefunds];
   } catch (err) {

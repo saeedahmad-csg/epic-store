@@ -349,12 +349,14 @@ export async function updatePolicyDocument(buffer: Buffer): Promise<{ success: b
 }
 
 /**
- * Validates that all required core policy clauses are present in the parsed Word document.
- * If any core clause is missing, automated refund decisioning must safely yield to manual admin review.
+ * Validates that all required core policy clauses are present in the parsed Word document,
+ * and ensures that all numeric thresholds (day windows, restocking fee amounts) and semantic rules are intact.
+ * If any core clause is missing or corrupted, automated refund decisioning safely yields to manual admin review.
  */
 export function validatePolicyIntegrity(clauses: PolicyClause[]): {
   valid: boolean;
   missingClauses: string[];
+  semanticErrors: string[];
 } {
   const REQUIRED_SECTIONS = [
     "SEC-1",
@@ -371,14 +373,64 @@ export function validatePolicyIntegrity(clauses: PolicyClause[]): {
   ];
 
   if (!clauses || clauses.length === 0) {
-    return { valid: false, missingClauses: REQUIRED_SECTIONS };
+    return {
+      valid: false,
+      missingClauses: REQUIRED_SECTIONS,
+      semanticErrors: ["Policy document is empty or unparsed."],
+    };
   }
 
-  const present = new Set(clauses.map((c) => c.sectionId));
-  const missing = REQUIRED_SECTIONS.filter((sec) => !present.has(sec));
+  const clauseMap = new Map(clauses.map((c) => [c.sectionId, c]));
+  const missing = REQUIRED_SECTIONS.filter((sec) => !clauseMap.has(sec));
+  const semanticErrors: string[] = [];
+
+  // 1. Verify standard window clause has day numbers
+  const sec21 = clauseMap.get("SEC-2.1");
+  if (sec21 && !/\d+\s*days/i.test(sec21.content)) {
+    semanticErrors.push("SEC-2.1 missing explicit return window days (e.g., '30 days').");
+  }
+
+  // 2. Verify opened accessories window has day numbers
+  const sec22 = clauseMap.get("SEC-2.2");
+  if (sec22 && !/\d+\s*days/i.test(sec22.content)) {
+    semanticErrors.push("SEC-2.2 missing explicit accessory return window days (e.g., '14 days').");
+  }
+
+  // 3. Verify Gold tier has extended window days
+  const sec24 = clauseMap.get("SEC-2.4");
+  if (sec24 && !/\d+\s*days/i.test(sec24.content)) {
+    semanticErrors.push("SEC-2.4 missing extended loyalty window days (e.g., '45 days').");
+  }
+
+  // 4. Verify DOA limit has day numbers
+  const sec31 = clauseMap.get("SEC-3.1");
+  if (sec31 && !/\d+\s*days/i.test(sec31.content)) {
+    semanticErrors.push("SEC-3.1 missing explicit Defective on Arrival reporting window (e.g., '14 days').");
+  }
+
+  // 5. Verify Restocking Fee has dollar amount
+  const sec33 = clauseMap.get("SEC-3.3");
+  if (sec33 && !/\$\d+(\.\d{2})?/.test(sec33.content)) {
+    semanticErrors.push("SEC-3.3 missing restocking fee dollar amount (e.g., '$5.00').");
+  }
+
+  // 6. Verify Clearance / Final sale specifies 50% or non-refundable condition
+  const sec23 = clauseMap.get("SEC-2.3");
+  if (sec23 && !/(50%|discount|clearance|final\s*sale)/i.test(sec23.content)) {
+    semanticErrors.push("SEC-2.3 missing clearance discount or final sale terms.");
+  }
+
+  // 7. Verify Hygiene clause specifies in-ear or sanitary protection
+  const sec42 = clauseMap.get("SEC-4.2");
+  if (sec42 && !/(hygiene|sanitary|earbud|seal)/i.test(sec42.content)) {
+    semanticErrors.push("SEC-4.2 missing sanitary or hygiene packaging terms.");
+  }
+
+  const valid = missing.length === 0 && semanticErrors.length === 0;
 
   return {
-    valid: missing.length === 0,
+    valid,
     missingClauses: missing,
+    semanticErrors,
   };
 }

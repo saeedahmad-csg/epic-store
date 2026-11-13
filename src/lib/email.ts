@@ -45,12 +45,13 @@ export const emailDispatchLog: SentEmailRecord[] = initialEmailData.logs;
 const dispatchedRefundIds = new Set<string>(initialEmailData.dispatchedIds);
 
 function saveDurableEmailStore(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  const tempFile = `${EMAIL_STORE_FILE}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
     fs.writeFileSync(
-      EMAIL_STORE_FILE,
+      tempFile,
       JSON.stringify(
         {
           logs: emailDispatchLog,
@@ -61,8 +62,12 @@ function saveDurableEmailStore(): void {
       ),
       "utf-8"
     );
+    fs.renameSync(tempFile, EMAIL_STORE_FILE);
   } catch (err) {
-    console.error("Failed to write durable email store:", err);
+    try {
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    } catch {}
+    console.error("Failed to atomically write durable email store:", err);
   }
 }
 
