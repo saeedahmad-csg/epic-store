@@ -186,7 +186,12 @@ function redactToolArgs(args: any): any {
 /**
  * Execute tool calls locally against Google Sheets, Policy engine, and Email service
  */
-async function executeTool(name: string, args: any, sessionEmail?: string): Promise<any> {
+async function executeTool(
+  name: string,
+  args: any,
+  sessionEmail?: string,
+  internalSessionToken?: string
+): Promise<any> {
   console.log(`🛠️ Executing Agent Tool: ${name}`, redactToolArgs(args));
 
   if (name === "search_products") {
@@ -261,7 +266,7 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
       // A request is ONLY verified if the caller provides a valid OTP or active verified session token.
       // Knowing the checkout email or card suffix does NOT count as proof of identity.
       const providedOtp = (args.otpCode || "").trim();
-      const providedSessionToken = (args.sessionToken || "").trim();
+      const providedSessionToken = (args.sessionToken || internalSessionToken || "").trim();
 
       const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
       const sessionValid = isCustomerSessionValid(order.orderId, providedSessionToken);
@@ -372,7 +377,7 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
 
     // Verify ownership: customer MUST verify via OTP or active authenticated customer session
     const providedOtp = (args.otpCode || "").trim();
-    const providedSessionToken = (args.sessionToken || "").trim();
+    const providedSessionToken = (args.sessionToken || internalSessionToken || "").trim();
 
     const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
     const sessionValid = isCustomerSessionValid(order.orderId, providedSessionToken);
@@ -607,12 +612,15 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
 export async function processChatWithAgent(params: {
   messages: Array<{ role: "user" | "assistant" | "model"; content: string }>;
   customerEmail?: string;
+  customerSessionToken?: string;
 }): Promise<{
   reply: string;
   toolCalls: string[];
   refundData?: any;
+  customerSessionToken?: string;
 }> {
   const { messages, customerEmail = "guest@example.com" } = params;
+  let activeCustomerSessionToken = params.customerSessionToken;
   const toolCallsLog: string[] = [];
   let detectedRefundData: any = null;
 
@@ -694,7 +702,10 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
       const toolName = call.name || "unknown_tool";
       toolCallsLog.push(toolName);
 
-      const toolResult = await executeTool(toolName, call.args, customerEmail);
+      const toolResult = await executeTool(toolName, call.args, customerEmail, activeCustomerSessionToken);
+      if (toolResult?._internalSessionToken) {
+        activeCustomerSessionToken = toolResult._internalSessionToken;
+      }
       if (toolName === "evaluate_and_submit_refund") {
         detectedRefundData = toolResult;
       }
@@ -758,6 +769,7 @@ STRICT GROUNDING, SECURITY & PRIVACY DIRECTIVES:
       reply,
       toolCalls: toolCallsLog,
       refundData: detectedRefundData,
+      customerSessionToken: activeCustomerSessionToken,
     };
   } catch (err: any) {
     console.error("Gemini API error, falling back to contextual simulator:", err);
