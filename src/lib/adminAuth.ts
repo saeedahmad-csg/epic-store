@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 /**
  * Validates request authorization against ADMIN_SECRET_KEY.
- * - In local development (when ADMIN_SECRET_KEY is not defined in env), allows requests.
- * - In production or when configured, requires matching header 'x-admin-key' or '?adminKey='.
+ * - Strictly requires header 'x-admin-key'.
+ * - Query-string authentication (?adminKey=) is rejected to prevent credential leakage in URLs and logs.
+ * - Fails closed with 401 if ADMIN_SECRET_KEY is missing or invalid.
  */
 export function requireAdminKey(req?: Request | NextRequest | null): NextResponse | null {
   const adminKey = process.env.ADMIN_SECRET_KEY;
@@ -21,21 +22,15 @@ export function requireAdminKey(req?: Request | NextRequest | null): NextRespons
     );
   }
 
+  // Strictly require x-admin-key HTTP header. Query parameters are rejected for security.
   let providedKey: string | null = null;
   if (req.headers) {
     providedKey = req.headers.get("x-admin-key");
   }
 
-  if (!providedKey && req.url) {
-    try {
-      const parsed = new URL(req.url);
-      providedKey = parsed.searchParams.get("adminKey");
-    } catch {}
-  }
-
   if (!providedKey || providedKey !== adminKey) {
     return NextResponse.json(
-      { error: "Unauthorized: Invalid or missing Admin Key." },
+      { error: "Unauthorized: Invalid or missing x-admin-key header." },
       { status: 401 }
     );
   }

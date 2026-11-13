@@ -9,12 +9,28 @@ export interface SentEmailRecord {
   amount: number;
   htmlContent: string;
   sentAt: string;
-  status: "DELIVERED" | "TEST_DISPATCHED" | "FAILED";
+  status: "SMTP_ACCEPTED" | "TEST_DISPATCHED" | "FAILED";
   transportInfo: string;
 }
 
 // In-memory log of dispatched emails for UI inspection
 export const emailDispatchLog: SentEmailRecord[] = [];
+
+// Idempotency tracking to prevent duplicate confirmation emails
+const dispatchedRefundIds = new Set<string>();
+
+/**
+ * Sanitizes user inputs to prevent HTML injection in emails
+ */
+export function escapeHtml(str: string): string {
+  if (!str) return "";
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
 /**
  * Generates an executive-styled HTML receipt for refund confirmation
@@ -27,7 +43,12 @@ export function generateRefundEmailHtml(params: {
   amount: number;
   reason: string;
 }): string {
-  const { customerName, refundId, orderId, productName, amount, reason } = params;
+  const customerName = escapeHtml(params.customerName);
+  const refundId = escapeHtml(params.refundId);
+  const orderId = escapeHtml(params.orderId);
+  const productName = escapeHtml(params.productName);
+  const reason = escapeHtml(params.reason);
+  const amount = params.amount;
 
   return `
     <!DOCTYPE html>
@@ -49,6 +70,7 @@ export function generateRefundEmailHtml(params: {
         .details-table td:last-child { color: #111827; font-weight: 600; }
         .amount-box { background: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 8px; padding: 16px; text-align: center; margin: 20px 0; }
         .amount-val { font-size: 32px; font-weight: 800; color: #059669; margin: 4px 0; }
+        .notice-banner { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #92400e; margin: 16px 0; line-height: 1.5; }
         .timeline { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 0 8px 8px 0; font-size: 13px; color: #1e40af; margin-top: 20px; line-height: 1.5; }
         .footer { background: #f9fafb; padding: 18px 24px; text-align: center; font-size: 12px; color: #9ca3af; border-top: 1px solid #f3f4f6; }
       </style>
@@ -61,7 +83,7 @@ export function generateRefundEmailHtml(params: {
         </div>
         <div class="content">
           <div style="text-align: center;">
-            <span class="badge">✓ Refund Approved & Processed</span>
+            <span class="badge">✓ Refund Approved & Recorded</span>
           </div>
 
           <p style="font-size: 15px;">Hello <strong>${customerName || "Valued Customer"}</strong>,</p>
@@ -73,6 +95,10 @@ export function generateRefundEmailHtml(params: {
             <div style="font-size: 13px; color: #64748b; text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em;">Approved Refund Amount</div>
             <div class="amount-val">$${amount.toFixed(2)}</div>
             <div style="font-size: 12px; color: #64748b;">Credited back to original payment method</div>
+          </div>
+
+          <div class="notice-banner">
+            <strong>⚠️ Capstone Simulation Disclosure:</strong> This transaction was approved within the ApexStore capstone demonstration platform. Payment processing is simulated; no actual credit card charges or monetary transfers were executed.
           </div>
 
           <table class="details-table">
@@ -96,7 +122,7 @@ export function generateRefundEmailHtml(params: {
 
           <div class="timeline">
             <strong>⏱ Payout Timeline:</strong><br/>
-            Depending on your financial institution, the funds will reflect in your account within <strong>3 to 5 business days</strong>. No further action is required from you.
+            Depending on your financial institution, simulated funds will reflect in your account within <strong>3 to 5 business days</strong>. No further action is required from you.
           </div>
         </div>
         <div class="footer">
@@ -121,6 +147,16 @@ export async function sendRefundConfirmationEmail(params: {
   amount: number;
   reason: string;
 }): Promise<{ success: boolean; messageId?: string; mode: string }> {
+  // Idempotency Guard: prevent duplicate email dispatches for the same refund request
+  if (params.refundId && dispatchedRefundIds.has(params.refundId)) {
+    console.log(`ℹ️ Refund email for ${params.refundId} already dispatched. Skipping duplicate send.`);
+    return {
+      success: true,
+      messageId: `IDEMPOTENT_SKIPPED_${params.refundId}`,
+      mode: "IDEMPOTENT_SKIPPED",
+    };
+  }
+
   const html = generateRefundEmailHtml(params);
   const subject = `[ApexStore] Refund Confirmed for Order #${params.orderId} ($${params.amount.toFixed(2)})`;
   const emailId = `EML-${Date.now()}`;
@@ -161,10 +197,11 @@ export async function sendRefundConfirmationEmail(params: {
         amount: params.amount,
         htmlContent: html,
         sentAt: new Date().toISOString(),
-        status: "DELIVERED",
-        transportInfo: `Live SMTP (${host}) - Message ID: ${info.messageId}`,
+        status: "SMTP_ACCEPTED",
+        transportInfo: `Live SMTP (${host}) - SMTP Handshake Accepted: ${info.messageId}`,
       };
 
+      dispatchedRefundIds.add(params.refundId);
       emailDispatchLog.unshift(record);
       return { success: true, messageId: info.messageId, mode: "LIVE_SMTP" };
     } catch (err: any) {
@@ -182,7 +219,7 @@ export async function sendRefundConfirmationEmail(params: {
         transportInfo: `SMTP Delivery Failed: ${err.message}`,
       };
       emailDispatchLog.unshift(failedRecord);
-      return { success: false, error: err.message, mode: "SMTP_FAILED" };
+      return { success: false, mode: "SMTP_FAILED" };
     }
   }
 
@@ -200,9 +237,7 @@ export async function sendRefundConfirmationEmail(params: {
     transportInfo: "Logged in-app Dispatcher (No active external SMTP credentials)",
   };
 
-  emailDispatchLog.unshift(record);
-  return { success: true, messageId: emailId, mode: "LOCAL_DISPATCH_LOG" };
-
+  dispatchedRefundIds.add(params.refundId);
   emailDispatchLog.unshift(record);
   console.log(`📧 Dispatched Refund Email [${record.id}] to ${record.recipient} for Refund ${params.refundId}`);
 

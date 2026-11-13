@@ -39,6 +39,19 @@ export async function POST(req: NextRequest) {
     }
 
     const newAdminStatus = action === "APPROVE" ? "APPROVED" : "REJECTED";
+
+    // Idempotency check: if the refund is already in the requested status, prevent redundant processing and duplicate emails
+    const existingRefunds = await getRefundRequests();
+    const currentRefund = existingRefunds.find((r) => r.refundId === refundId);
+    if (currentRefund && currentRefund.adminStatus === newAdminStatus) {
+      return NextResponse.json({
+        success: true,
+        refund: currentRefund,
+        message: `Refund #${refundId} is already ${newAdminStatus}. Duplicate processing skipped.`,
+        isDuplicate: true,
+      });
+    }
+
     const updateRes = await updateRefundStatus(refundId, newAdminStatus);
 
     if (!updateRes.success || !updateRes.refund) {

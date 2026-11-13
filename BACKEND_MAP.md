@@ -9,7 +9,7 @@
 ## 1. Entry Points & Configuration
 
 - **Next.js App Configuration**: [`next.config.ts`](file:///d:/Projects/15-Agent/next.config.ts#L1-L7)
-- **Environment & Secret Config**: [`.env`](file:///d:/Projects/15-Agent/.env) & [`.env.example`](file:///d:/Projects/15-Agent/.env.example)
+- **Environment & Secret Config**: [`.env`](file:///d:/Projects/15-Agent/.env)
   - `GEMINI_API_KEY`: API key for Google GenAI SDK
   - `GEMINI_MODEL`: Model identifier (e.g. `gemini-3.5-flash` or `gemini-2.5-flash`)
   - `GEMINI_THINKING_BUDGET`: Thinking budget for low-latency response (`0`)
@@ -38,14 +38,15 @@
 | `POST` | `/api/refunds` | [`src/app/api/refunds/route.ts#L18-L63`](file:///d:/Projects/15-Agent/src/app/api/refunds/route.ts#L18-L63) | `POST(req)` | Human-in-the-loop action endpoint to `APPROVE` or `REJECT` a refund request and automatically dispatch confirmation email. |
 | `GET` | `/api/orders` | [`src/app/api/orders/route.ts#L4-L30`](file:///d:/Projects/15-Agent/src/app/api/orders/route.ts#L4-L30) | `GET(req)` | Fetches a specific order by `?orderId=...` or list of orders matching `?email=...`. |
 | `GET` | `/api/products` | [`src/app/api/products/route.ts#L4-L15`](file:///d:/Projects/15-Agent/src/app/api/products/route.ts#L4-L15) | `GET(req)` | Queries the live product catalog by `?query=...` and/or `?category=...`. |
+| `POST` | `/api/admin/login` | [`src/app/api/admin/login/route.ts#L22-L85`](file:///d:/Projects/15-Agent/src/app/api/admin/login/route.ts#L22-L85) | `POST(req)` | Authenticates administrator credentials against environment variables with 5 attempts/min sliding-window rate limiting. |
 
 ---
 
 ## 3. Services & Business Logic
 
 ### `src/lib/adminAuth.ts`
-- [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L8-L23)
-  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` via `x-admin-key` header or `?adminKey=` query parameter. Fails closed with 401 Unauthorized if `ADMIN_SECRET_KEY` is missing or invalid.
+- [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L8-L40)
+  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` strictly via the `x-admin-key` header. Query-string parameter `?adminKey=` is rejected to prevent credential leakage. Fails closed with 401 Unauthorized if `ADMIN_SECRET_KEY` is missing or invalid.
 
 ### `src/lib/gemini.ts`
 - [`sanitizePaymentMethod(method?: string): string`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L18-L24)
@@ -54,15 +55,15 @@
   - **Purpose**: Extracts card digits for two-factor verification challenges without exposing them.
 - [`runtimeSettings`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L36-L38)
   - **Purpose**: In-memory state holding `autoApproveRefunds` toggle.
-- [`toolsDeclarations`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L41-L115)
-  - **Purpose**: Declarations for Gemini tools: `search_products`, `lookup_order`, `check_refund_policy`, `evaluate_and_submit_refund`.
-- [`executeTool(name: string, args: any): Promise<any>`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L120-L318)
-  - **Purpose**: Dispatches tool executions to Google Sheets, Clause-Level RAG engine, and email service.
-  - **Dependencies**: `searchProducts`, `getOrderById`, `getCustomerByEmail`, `searchPolicyRAG`, `createRefundRequest`, `sendRefundConfirmationEmail`.
-- [`processChatWithAgent(params)`: `Promise<{ reply, toolCalls, refundData? }>`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L323-L457)
+- [`toolsDeclarations`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L41-L125)
+  - **Purpose**: Declarations for Gemini tools: `search_products`, `lookup_order` (with cardLast4/customerEmail verification), `check_refund_policy`, `evaluate_and_submit_refund`.
+- [`executeTool(name: string, args: any): Promise<any>`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L125-L480)
+  - **Purpose**: Dispatches tool executions to Google Sheets, Clause-Level RAG engine, and email service with server-side identity verification and strict DOCX policy evaluation (14-day DOA cap, Silver/Gold restocking fee waiver, 50%+ discount clearance final-sale rule, opened accessories 14-day window, and missing-DOCX safe fallback to manual admin review).
+  - **Dependencies**: `getProducts`, `searchProducts`, `getOrderById`, `getCustomerByEmail`, `searchPolicyRAG`, `createRefundRequest`, `sendRefundConfirmationEmail`.
+- [`processChatWithAgent(params)`: `Promise<{ reply, toolCalls, refundData? }>`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L430-L570)
   - **Purpose**: Core conversational handler using Google GenAI SDK (`GoogleGenAI`), running multi-turn tool loops up to 5 iterations.
-- [`simulateAgentResponse(messages, customerEmail)`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L462-L719)
-  - **Purpose**: Offline/fallback simulation engine preserving multi-turn conversation memory, customer authentication, 2FA challenge flow, and policy evaluation.
+- [`simulateAgentResponse(messages, customerEmail)`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L575-L880)
+  - **Purpose**: Offline/fallback simulation engine preserving multi-turn conversation memory, customer authentication, 2FA challenge flow (card last 4 / email verification), and policy evaluation.
 - [`extractOrder(text: string): string | null`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L501-L510)
   - **Purpose**: Flexible parser extracting Order IDs across varied user patterns (`order 1049`, `ORD-1049`, `#1049`, `1049`).
 
@@ -113,11 +114,13 @@
   - **Purpose**: Writes new `.docx` buffer to `data/company_policies.docx` and invalidates in-memory caches.
 
 ### `src/lib/email.ts`
-- [`generateRefundEmailHtml(params): string`](file:///d:/Projects/15-Agent/src/lib/email.ts#L22-L110)
-  - **Purpose**: Constructs an executive HTML receipt template with order, refund ID, amount, and payout timeline details.
-- [`sendRefundConfirmationEmail(params): Promise<{ success, messageId?, mode }>`](file:///d:/Projects/15-Agent/src/lib/email.ts#L115-L188)
-  - **Purpose**: Sends email via Nodemailer SMTP if credentials exist in `.env`, or stores to local dispatch log for Admin inspection.
-- [`getDispatchedEmails(): SentEmailRecord[]`](file:///d:/Projects/15-Agent/src/lib/email.ts#L190-L192)
+- [`escapeHtml(str: string): string`](file:///d:/Projects/15-Agent/src/lib/email.ts#L24-L33)
+  - **Purpose**: Sanitizes user inputs (`customerName`, `productName`, `reason`) to prevent HTML injection in emails.
+- [`generateRefundEmailHtml(params): string`](file:///d:/Projects/15-Agent/src/lib/email.ts#L38-L135)
+  - **Purpose**: Constructs an executive HTML receipt template with order, refund ID, amount, capstone simulated payout disclosure, and payout timeline details.
+- [`sendRefundConfirmationEmail(params): Promise<{ success, messageId?, mode }>`](file:///d:/Projects/15-Agent/src/lib/email.ts#L140-L245)
+  - **Purpose**: Sends email via Nodemailer SMTP if credentials exist in `.env`, or stores to local dispatch log for Admin inspection. Features idempotency tracking against duplicate dispatches and accurate `SMTP_ACCEPTED` status.
+- [`getDispatchedEmails(): SentEmailRecord[]`](file:///d:/Projects/15-Agent/src/lib/email.ts#L247-L250)
   - **Purpose**: Returns all dispatched or logged email receipts.
 
 ---
@@ -139,7 +142,7 @@
 - **Interface**: [`PolicyClause`](file:///d:/Projects/15-Agent/src/lib/policies.ts#L13-L24)
   - **Fields**: `sectionId: string`, `parentSection?: string`, `title: string`, `isParent: boolean`, `content: string`, `summary: string`, `keywords: string[]`, `relevanceScore?: number`, `matchConfidence?: "HIGH" | "MEDIUM" | "LOW"`, `matchedTokens?: string[]`
 - **Interface**: [`SentEmailRecord`](file:///d:/Projects/15-Agent/src/lib/email.ts#L3-L14)
-  - **Fields**: `id: string`, `recipient: string`, `subject: string`, `refundId: string`, `orderId: string`, `amount: number`, `htmlContent: string`, `sentAt: string`, `status: "DELIVERED" | "TEST_DISPATCHED" | "FAILED"`, `transportInfo: string`
+  - **Fields**: `id: string`, `recipient: string`, `subject: string`, `refundId: string`, `orderId: string`, `amount: number`, `htmlContent: string`, `sentAt: string`, `status: "SMTP_ACCEPTED" | "TEST_DISPATCHED" | "FAILED"`, `transportInfo: string`
 
 ---
 

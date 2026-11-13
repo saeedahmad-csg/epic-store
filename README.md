@@ -59,9 +59,12 @@ npm install
 ```
 
 ### 2. Configure Environment Variables
-Copy `.env.example` to `.env.local`:
-```bash
-cp .env.example .env.local
+Create a `.env` file with your configuration:
+```env
+GEMINI_API_KEY=your-gemini-api-key
+ADMIN_EMAIL=admin@apexstore.com
+ADMIN_PASSWORD=your-secure-password
+ADMIN_SECRET_KEY=your-admin-secret-key
 ```
 
 Fill in your API keys:
