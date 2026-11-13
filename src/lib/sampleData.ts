@@ -44,6 +44,7 @@ export interface RefundRequest {
   adminStatus: "PENDING" | "APPROVED" | "REJECTED";
   createdAt: string;
   approvedAt: string;
+  emailStatus?: "PENDING" | "SMTP_ACCEPTED" | "TEST_DISPATCHED" | "FAILED";
 }
 
 export interface InteractionLog {

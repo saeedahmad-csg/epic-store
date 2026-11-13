@@ -479,6 +479,41 @@ export async function getCustomerByEmail(email: string): Promise<Customer | null
   return customers.find((c) => c.email.toLowerCase() === normalized) || null;
 }
 
+// In-memory Customer OTP store for verifiable customer identity verification
+interface CustomerOtpRecord {
+  orderId: string;
+  email: string;
+  otpCode: string;
+  expiresAt: number;
+}
+const customerOtpStore = new Map<string, CustomerOtpRecord>();
+
+export function storeCustomerOtp(orderId: string, email: string, otpCode: string): void {
+  const normalizedOrder = orderId.trim().toUpperCase();
+  customerOtpStore.set(normalizedOrder, {
+    orderId: normalizedOrder,
+    email: email.trim().toLowerCase(),
+    otpCode: otpCode.trim(),
+    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes expiry
+  });
+}
+
+export function verifyCustomerOtp(orderId: string, code: string): { verified: boolean; email?: string; message?: string } {
+  const normalizedOrder = orderId.trim().toUpperCase();
+  const record = customerOtpStore.get(normalizedOrder);
+  if (!record) {
+    return { verified: false, message: "No active verification code found for this order. Please request a verification code." };
+  }
+  if (Date.now() > record.expiresAt) {
+    customerOtpStore.delete(normalizedOrder);
+    return { verified: false, message: "Verification code has expired. Please request a new code." };
+  }
+  if (record.otpCode !== code.trim()) {
+    return { verified: false, message: "Invalid verification code. Please check your email and try again." };
+  }
+  return { verified: true, email: record.email };
+}
+
 export async function getRefundRequests(): Promise<RefundRequest[]> {
   const client = getSheetsClient();
   if (!client) return memoryRefunds;
@@ -486,11 +521,11 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
   try {
     const res = await client.sheets.spreadsheets.values.get({
       spreadsheetId: client.sheetId,
-      range: "RefundRequests!A2:K",
+      range: "RefundRequests!A2:L",
     });
 
     const rows = res.data.values || [];
-    return rows.map((r) => ({
+    const sheetRefunds: RefundRequest[] = rows.map((r) => ({
       refundId: r[0],
       orderId: r[1],
       customerEmail: r[2],
@@ -502,9 +537,65 @@ export async function getRefundRequests(): Promise<RefundRequest[]> {
       adminStatus: (r[8] as RefundRequest["adminStatus"]) || "PENDING",
       createdAt: r[9],
       approvedAt: r[10] || "",
+      emailStatus: (r[11] as RefundRequest["emailStatus"]) || undefined,
     }));
+
+    // Merge in-memory refunds: if a refund was created in memory but failed to append to Sheets,
+    // ensure it is still returned so it is never hidden from administrators
+    const sheetIds = new Set(sheetRefunds.map((r) => r.refundId));
+    const memoryMap = new Map(memoryRefunds.map((r) => [r.refundId, r]));
+
+    const unpersistedFromMemory = memoryRefunds.filter((r) => !sheetIds.has(r.refundId));
+
+    // Overlay any fresher local memory states (such as emailStatus or recent local status updates)
+    const mergedSheetRefunds = sheetRefunds.map((sr) => {
+      const mem = memoryMap.get(sr.refundId);
+      if (mem) {
+        return {
+          ...sr,
+          emailStatus: mem.emailStatus || sr.emailStatus,
+          adminStatus: mem.adminStatus || sr.adminStatus,
+        };
+      }
+      return sr;
+    });
+
+    return [...unpersistedFromMemory, ...mergedSheetRefunds];
   } catch (err) {
     return memoryRefunds;
+  }
+}
+
+export async function updateRefundEmailStatus(
+  refundId: string,
+  emailStatus: "PENDING" | "SMTP_ACCEPTED" | "TEST_DISPATCHED" | "FAILED"
+): Promise<void> {
+  const index = memoryRefunds.findIndex((r) => r.refundId === refundId);
+  if (index !== -1) {
+    memoryRefunds[index].emailStatus = emailStatus;
+  }
+
+  const client = getSheetsClient();
+  if (client) {
+    try {
+      const res = await client.sheets.spreadsheets.values.get({
+        spreadsheetId: client.sheetId,
+        range: "RefundRequests!A:A",
+      });
+      const rows = res.data.values || [];
+      const rowIndex = rows.findIndex((r) => r[0] === refundId);
+      if (rowIndex !== -1) {
+        const rowNumber = rowIndex + 1;
+        await client.sheets.spreadsheets.values.update({
+          spreadsheetId: client.sheetId,
+          range: `RefundRequests!L${rowNumber}`,
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [[emailStatus]] },
+        });
+      }
+    } catch (err) {
+      console.warn("Could not sync email status to Google Sheets column L:", err);
+    }
   }
 }
 

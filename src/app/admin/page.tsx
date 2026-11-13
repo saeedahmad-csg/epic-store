@@ -172,7 +172,7 @@ export default function AdminPage() {
     }
   }
 
-  async function handleRefundAction(refundId: string, action: "APPROVE" | "REJECT") {
+  async function handleRefundAction(refundId: string, action: "APPROVE" | "REJECT" | "RETRY_EMAIL") {
     setProcessingRefundId(refundId);
     try {
       const res = await fetch("/api/refunds", {
@@ -200,13 +200,19 @@ export default function AdminPage() {
         } else {
           showSuccess(`Refund ${refundId} approved and receipt recorded in Dispatch Viewer.`);
         }
+      } else if (action === "RETRY_EMAIL") {
+        if (data.emailDispatched?.success) {
+          showSuccess(`Confirmation email successfully resent for refund ${refundId}.`);
+        } else {
+          showError(`Email retry failed for refund ${refundId}.`);
+        }
       } else {
         showSuccess(`Refund ${refundId} rejected.`);
       }
 
       await loadAdminData(true);
     } catch (err: any) {
-      showError(err.message || `Failed to ${action.toLowerCase()} refund.`);
+      showError(err.message || `Failed to process refund.`);
     } finally {
       setProcessingRefundId(null);
     }
@@ -632,18 +638,43 @@ export default function AdminPage() {
                             {r.reason}
                           </p>
                         </td>
-                        <td className="px-5 py-3.5">
-                          <span
-                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
-                              r.adminStatus === "APPROVED"
-                                ? "bg-emerald-100 text-emerald-800"
-                                : r.adminStatus === "PENDING"
-                                ? "bg-amber-100 text-amber-800"
-                                : "bg-rose-100 text-rose-800"
-                            }`}
-                          >
-                            {r.adminStatus}
-                          </span>
+                        <td className="px-5 py-3.5 space-y-1">
+                          <div>
+                            <span
+                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-semibold ${
+                                r.adminStatus === "APPROVED"
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : r.adminStatus === "PENDING"
+                                  ? "bg-amber-100 text-amber-800"
+                                  : "bg-rose-100 text-rose-800"
+                              }`}
+                            >
+                              {r.adminStatus}
+                            </span>
+                          </div>
+                          {r.adminStatus === "APPROVED" && (
+                            <div>
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded text-[9px] font-medium ${
+                                  r.emailStatus === "SMTP_ACCEPTED"
+                                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                    : r.emailStatus === "TEST_DISPATCHED"
+                                    ? "bg-blue-50 text-blue-700 border border-blue-200"
+                                    : r.emailStatus === "FAILED"
+                                    ? "bg-rose-50 text-rose-700 border border-rose-200 font-bold"
+                                    : "bg-slate-100 text-slate-600"
+                                }`}
+                              >
+                                {r.emailStatus === "SMTP_ACCEPTED"
+                                  ? "Email: Sent"
+                                  : r.emailStatus === "TEST_DISPATCHED"
+                                  ? "Email: Dispatched"
+                                  : r.emailStatus === "FAILED"
+                                  ? "Email: Failed"
+                                  : "Email: Pending"}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="px-5 py-3.5 text-right space-x-2 whitespace-nowrap">
                           {r.adminStatus === "PENDING" ? (
@@ -663,6 +694,15 @@ export default function AdminPage() {
                                 {processingRefundId === r.refundId ? "Saving..." : "Reject"}
                               </button>
                             </>
+                          ) : r.adminStatus === "APPROVED" && (r.emailStatus === "FAILED" || !r.emailStatus || r.emailStatus === "PENDING") ? (
+                            <button
+                              disabled={processingRefundId === r.refundId}
+                              onClick={() => handleRefundAction(r.refundId, "RETRY_EMAIL")}
+                              className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-50 text-amber-800 border border-amber-300 font-medium text-xs transition-colors"
+                              title="Resend customer refund receipt email"
+                            >
+                              {processingRefundId === r.refundId ? "Sending..." : "Retry Email"}
+                            </button>
                           ) : (
                             <span className="text-xs text-slate-400 italic">Resolved</span>
                           )}

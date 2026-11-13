@@ -146,7 +146,13 @@ export async function sendRefundConfirmationEmail(params: {
   productName: string;
   amount: number;
   reason: string;
-}): Promise<{ success: boolean; messageId?: string; mode: string }> {
+  forceRetry?: boolean;
+}): Promise<{ success: boolean; messageId?: string; mode: string; status: "SMTP_ACCEPTED" | "TEST_DISPATCHED" | "FAILED" }> {
+  // If forceRetry is requested, clear any previous idempotency locks for this refund
+  if (params.forceRetry && params.refundId) {
+    dispatchedRefundIds.delete(params.refundId);
+  }
+
   // Idempotency Guard: prevent duplicate email dispatches for the same refund request
   if (params.refundId && dispatchedRefundIds.has(params.refundId)) {
     console.log(`ℹ️ Refund email for ${params.refundId} already dispatched. Skipping duplicate send.`);
@@ -154,6 +160,7 @@ export async function sendRefundConfirmationEmail(params: {
       success: true,
       messageId: `IDEMPOTENT_SKIPPED_${params.refundId}`,
       mode: "IDEMPOTENT_SKIPPED",
+      status: "SMTP_ACCEPTED",
     };
   }
 
@@ -203,7 +210,7 @@ export async function sendRefundConfirmationEmail(params: {
 
       dispatchedRefundIds.add(params.refundId);
       emailDispatchLog.unshift(record);
-      return { success: true, messageId: info.messageId, mode: "LIVE_SMTP" };
+      return { success: true, messageId: info.messageId, mode: "LIVE_SMTP", status: "SMTP_ACCEPTED" };
     } catch (err: any) {
       console.error("Live SMTP send failed:", err.message);
       const failedRecord: SentEmailRecord = {
@@ -219,7 +226,7 @@ export async function sendRefundConfirmationEmail(params: {
         transportInfo: `SMTP Delivery Failed: ${err.message}`,
       };
       emailDispatchLog.unshift(failedRecord);
-      return { success: false, mode: "SMTP_FAILED" };
+      return { success: false, mode: "SMTP_FAILED", status: "FAILED" };
     }
   }
 
@@ -241,7 +248,108 @@ export async function sendRefundConfirmationEmail(params: {
   emailDispatchLog.unshift(record);
   console.log(`📧 Dispatched Refund Email [${record.id}] to ${record.recipient} for Refund ${params.refundId}`);
 
-  return { success: true, messageId: emailId, mode: "LOCAL_DISPATCH_LOG" };
+  return { success: true, messageId: emailId, mode: "LOCAL_DISPATCH_LOG", status: "TEST_DISPATCHED" };
+}
+
+/**
+ * Sends a one-time verification code (OTP) for customer identity authentication
+ */
+export async function sendCustomerOtpEmail(params: {
+  customerEmail: string;
+  customerName?: string;
+  orderId: string;
+  otpCode: string;
+}): Promise<{ success: boolean; mode: string }> {
+  const emailId = `OTP-${Date.now()}`;
+  const subject = `[ApexStore Security] Your Verification Code: ${params.otpCode} (Order #${params.orderId})`;
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><title>Your ApexStore Verification Code</title></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; padding: 24px; margin: 0;">
+      <div style="max-width: 520px; margin: 0 auto; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+        <div style="background: linear-gradient(135deg, #4338ca, #6366f1); padding: 24px; text-align: center; color: #ffffff;">
+          <h1 style="margin: 0; font-size: 20px;">ApexStore Account Security</h1>
+          <p style="margin: 6px 0 0; font-size: 13px; opacity: 0.9;">One-Time Customer Verification Code</p>
+        </div>
+        <div style="padding: 24px; color: #1e293b;">
+          <p style="font-size: 14px; margin-top: 0;">Hello ${escapeHtml(params.customerName || "Customer")},</p>
+          <p style="font-size: 13px; line-height: 1.5; color: #475569;">
+            A request was initiated to verify ownership of <strong>Order #${escapeHtml(params.orderId)}</strong>.
+            Please provide this 6-digit code to complete authentication:
+          </p>
+          <div style="background: #f1f5f9; border: 2px dashed #cbd5e1; border-radius: 8px; padding: 18px; text-align: center; margin: 20px 0;">
+            <div style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #4338ca; font-family: monospace;">${params.otpCode}</div>
+            <div style="font-size: 11px; color: #64748b; margin-top: 6px;">Valid for 10 minutes &bull; Do not share this code</div>
+          </div>
+          <p style="font-size: 12px; color: #94a3b8; line-height: 1.4;">
+            If you did not request this verification, you can safely disregard this email.
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const port = parseInt(process.env.SMTP_PORT || "587", 10);
+  const from = process.env.SMTP_FROM || '"ApexStore Security" <security@apexstore.demo>';
+
+  if (host && user && pass && pass !== "your-app-password" && user !== "support@yourdomain.com") {
+    try {
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        requireTLS: port !== 465,
+        connectionTimeout: 4000,
+        greetingTimeout: 3000,
+        socketTimeout: 4000,
+        tls: { rejectUnauthorized: true },
+        auth: { user, pass },
+      });
+
+      await transporter.sendMail({
+        from,
+        to: params.customerEmail,
+        subject,
+        html,
+      });
+
+      emailDispatchLog.unshift({
+        id: emailId,
+        recipient: params.customerEmail,
+        subject,
+        refundId: `OTP-${params.orderId}`,
+        orderId: params.orderId,
+        amount: 0,
+        htmlContent: html,
+        sentAt: new Date().toISOString(),
+        status: "SMTP_ACCEPTED",
+        transportInfo: `Live SMTP (${host}) - OTP code sent`,
+      });
+      return { success: true, mode: "LIVE_SMTP" };
+    } catch (err: any) {
+      console.error("Live SMTP OTP send failed:", err.message);
+    }
+  }
+
+  emailDispatchLog.unshift({
+    id: emailId,
+    recipient: params.customerEmail,
+    subject,
+    refundId: `OTP-${params.orderId}`,
+    orderId: params.orderId,
+    amount: 0,
+    htmlContent: html,
+    sentAt: new Date().toISOString(),
+    status: "TEST_DISPATCHED",
+    transportInfo: `Demo OTP Dispatcher - Generated code: ${params.otpCode}`,
+  });
+  console.log(`🔑 Customer OTP for Order ${params.orderId} (${params.customerEmail}): [${params.otpCode}]`);
+  return { success: true, mode: "LOCAL_DISPATCH_LOG" };
 }
 
 export function getDispatchedEmails(): SentEmailRecord[] {

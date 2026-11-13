@@ -8,9 +8,12 @@ import {
   createRefundRequest,
   logCustomerInteraction,
   updateRefundStatus,
+  updateRefundEmailStatus,
+  storeCustomerOtp,
+  verifyCustomerOtp,
 } from "./googleSheets";
 import { getCompanyPolicies, searchPolicyRAG } from "./policies";
-import { sendRefundConfirmationEmail } from "./email";
+import { sendRefundConfirmationEmail, sendCustomerOtpEmail } from "./email";
 
 /**
  * Sanitizes payment method by stripping card digits so they are never exposed to users
@@ -79,7 +82,25 @@ const toolsDeclarations: any[] = [
           type: Type.STRING,
           description: "Optional: Last 4 digits of payment card provided for identity verification.",
         },
+        otpCode: {
+          type: Type.STRING,
+          description: "Optional: 6-digit one-time verification passcode sent to customer email.",
+        },
       },
+    },
+  },
+  {
+    name: "send_order_verification_otp",
+    description: "Dispatches a secure 6-digit one-time passcode (OTP) to the customer's registered email address for identity verification.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        orderId: {
+          type: Type.STRING,
+          description: "The unique order reference ID (e.g. 'ORD-1001') to authenticate.",
+        },
+      },
+      required: ["orderId"],
     },
   },
   {
@@ -113,6 +134,10 @@ const toolsDeclarations: any[] = [
           type: Type.STRING,
           description: "Optional: Last 4 digits of the payment card used at checkout for verification.",
         },
+        otpCode: {
+          type: Type.STRING,
+          description: "Optional: 6-digit one-time verification passcode sent to customer email.",
+        },
         reason: {
           type: Type.STRING,
           description: "Detailed reason given by customer for requesting refund.",
@@ -128,10 +153,33 @@ const toolsDeclarations: any[] = [
 ];
 
 /**
+ * Sanitizes tool arguments before logging to protect customer PII and sensitive credentials
+ */
+function redactToolArgs(args: any): any {
+  if (!args || typeof args !== "object") return args;
+  const sanitized: any = { ...args };
+  if (sanitized.customerEmail) {
+    const parts = sanitized.customerEmail.split("@");
+    sanitized.customerEmail = parts.length === 2 ? `${parts[0].slice(0, 2)}***@${parts[1]}` : "***";
+  }
+  if (sanitized.cardLast4) {
+    sanitized.cardLast4 = "****";
+  }
+  if (sanitized.otpCode) {
+    sanitized.otpCode = "******";
+  }
+  if (sanitized.customerQuery && sanitized.customerQuery.includes("@")) {
+    const parts = sanitized.customerQuery.split("@");
+    sanitized.customerQuery = `${parts[0].slice(0, 2)}***@${parts[1]}`;
+  }
+  return sanitized;
+}
+
+/**
  * Execute tool calls locally against Google Sheets, Policy engine, and Email service
  */
 async function executeTool(name: string, args: any, sessionEmail?: string): Promise<any> {
-  console.log(`🛠️ Executing Agent Tool: ${name}`, args);
+  console.log(`🛠️ Executing Agent Tool: ${name}`, redactToolArgs(args));
 
   if (name === "search_products") {
     const products = await searchProducts(args.query, args.category);
@@ -152,6 +200,32 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     };
   }
 
+  if (name === "send_order_verification_otp") {
+    if (!args.orderId) {
+      return { success: false, message: "Order ID is required to dispatch a verification code." };
+    }
+    const order = await getOrderById(args.orderId);
+    if (!order) {
+      return { success: false, message: `Order #${args.orderId} does not exist in our store records.` };
+    }
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    storeCustomerOtp(order.orderId, order.customerEmail, otpCode);
+    await sendCustomerOtpEmail({
+      customerEmail: order.customerEmail,
+      customerName: order.customerName,
+      orderId: order.orderId,
+      otpCode,
+    });
+    const emailParts = order.customerEmail.split("@");
+    const maskedEmail = emailParts.length === 2 ? `${emailParts[0].slice(0, 2)}***@${emailParts[1]}` : "***";
+    return {
+      success: true,
+      message: `A 6-digit verification code has been dispatched to ${maskedEmail}. Please provide this code to authenticate your session.`,
+      maskedEmail,
+      orderId: order.orderId,
+    };
+  }
+
   if (name === "lookup_order") {
     if (args.orderId) {
       const order = await getOrderById(args.orderId);
@@ -164,30 +238,35 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
 
       // Server-side identity verification:
       // A request is ONLY verified if the caller provides matching credentials:
-      // 1. Provided cardLast4 matches the order's actual payment card digits, OR
-      // 2. Provided customerEmail matches the order's registered customerEmail.
-      // Unverified bypass flags (e.g. args.isVerified) and browser session defaults are rejected.
+      // 1. Valid OTP code dispatched to the registered customer email, OR
+      // 2. Provided cardLast4 matches the order's actual payment card digits, OR
+      // 3. Provided customerEmail matches the order's registered customerEmail.
       const providedEmail = (args.customerEmail || "").trim().toLowerCase();
       const providedCardLast4 = (args.cardLast4 || "").trim();
+      const providedOtp = (args.otpCode || "").trim();
 
+      const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
       const emailMatches = Boolean(providedEmail && providedEmail === order.customerEmail.toLowerCase());
       const cardMatches = Boolean(providedCardLast4 && cardLast4 && providedCardLast4 === cardLast4);
-      const isVerified = emailMatches || cardMatches;
+      const isVerified = otpResult.verified || emailMatches || cardMatches;
 
       return {
         found: true,
         order: {
           orderId: order.orderId,
-          productName: order.productName,
-          quantity: order.quantity,
           orderStatus: order.orderStatus,
-          deliveryDate: order.deliveryDate,
+          productName: isVerified ? order.productName : "Protected (Verification required)",
+          quantity: isVerified ? order.quantity : 0,
+          deliveryDate: isVerified ? order.deliveryDate : "Protected (Verification required)",
           customerName: isVerified ? order.customerName : `${order.customerName.split(" ")[0]}***`,
           customerEmail: isVerified ? order.customerEmail : "Protected (Verification required)",
-          totalAmount: isVerified ? `$${order.totalAmount.toFixed(2)}` : "Verification required",
+          totalAmount: isVerified ? `$${order.totalAmount.toFixed(2)}` : "Protected (Verification required)",
           paymentMethod: isVerified ? sanitizedPayment : "Protected",
           customerTier: isVerified ? (customer?.loyaltyTier || "Bronze") : "Protected",
           requiresVerification: !isVerified,
+          verificationPrompt: !isVerified
+            ? "Order located. For customer privacy, product details and delivery contents are protected until you verify with registered email, last 4 card digits, or OTP code."
+            : undefined,
         },
       };
     } else if (args.customerQuery) {
@@ -201,12 +280,12 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         requiresVerification: true,
         orders: orders.map((o) => ({
           orderId: o.orderId,
-          productName: o.productName,
           orderStatus: o.orderStatus,
-          deliveryDate: o.deliveryDate,
+          productName: "Protected (Verification required)",
+          deliveryDate: "Protected",
           customerName: `${o.customerName.split(" ")[0]}***`,
         })),
-        verificationPrompt: "Account located. Please verify checkout email or last 4 card digits to access full details.",
+        verificationPrompt: "Account located. Please verify checkout email, last 4 card digits, or OTP verification code to access full order details.",
       };
     } else {
       return { found: false, message: "Please provide either an orderId (e.g. ORD-1001) or a customer name/email." };
@@ -248,19 +327,21 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     // Server-Side Authorization: Customer identity and tier are bound strictly to order.customerEmail from database
     const customer = await getCustomerByEmail(order.customerEmail);
 
-    // Verify ownership: customer must supply the matching checkout email OR matching last 4 card digits
+    // Verify ownership: customer must supply matching OTP code OR matching checkout email OR matching last 4 card digits
     const cardLast4 = extractCardLast4(order.paymentMethod);
     const providedEmail = (args.customerEmail || "").trim().toLowerCase();
     const providedCardLast4 = (args.cardLast4 || "").trim();
+    const providedOtp = (args.otpCode || "").trim();
 
+    const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
     const emailMatches = Boolean(providedEmail && providedEmail === order.customerEmail.toLowerCase());
     const cardMatches = Boolean(providedCardLast4 && cardLast4 && providedCardLast4 === cardLast4);
 
-    if (!emailMatches && !cardMatches) {
+    if (!otpResult.verified && !emailMatches && !cardMatches) {
       return {
         success: false,
         isEligible: false,
-        message: `Security Authorization Failed: Verification required. The provided credentials do not match Order #${order.orderId}. Please provide the registered checkout email or last 4 card digits.`,
+        message: `Security Authorization Failed: Verification required. The provided credentials do not match Order #${order.orderId}. Please provide the registered checkout email, last 4 card digits, or request an OTP verification code.`,
       };
     }
 
@@ -322,8 +403,10 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     const clearanceClause = findClause("SEC-2.3");
 
     // Dynamically derive allowed return window from Word document clauses
-    // Note: Section 2.2 restricts accessories to 14 days ONLY if opened; unopened accessories get standard 30 days
-    const isOpenedAccessory = productCategory.includes("accessories") && args.condition === "opened_working";
+    // Note: Section 2.2 restricts accessories & peripherals to 14 days ONLY if opened; unopened accessories get standard 30 days
+    const isOpenedAccessory =
+      (productCategory.includes("accessories") || productCategory.includes("peripheral")) &&
+      args.condition === "opened_working";
     let allowedDays = 30;
     if (isGold && goldClause) {
       const match = goldClause.content.match(/(\d+)\s*days/i);
@@ -452,6 +535,9 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         amount: savedRefund.refundAmount,
         reason: savedRefund.reason,
       });
+      if (emailResult?.status) {
+        await updateRefundEmailStatus(savedRefund.refundId, emailResult.status);
+      }
     }
 
     return {

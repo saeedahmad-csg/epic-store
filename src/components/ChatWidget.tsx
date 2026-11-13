@@ -117,7 +117,6 @@ export default function ChatWidget({ isOpen, onClose, initialPrompt }: ChatWidge
             role: m.role,
             content: m.content,
           })),
-          customerEmail: "sarah.connor@example.com",
         }),
       });
 
