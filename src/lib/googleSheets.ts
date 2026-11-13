@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import crypto from "crypto";
 import { google } from "googleapis";
 import {
   Product,
@@ -13,11 +14,40 @@ import {
   INITIAL_REFUNDS,
 } from "./sampleData";
 
-// Local in-memory store for fallback & caching
+const DATA_DIR = path.join(process.cwd(), "data");
+const REFUNDS_FILE = path.join(DATA_DIR, "refunds_store.json");
+
+function loadDurableRefunds(): RefundRequest[] {
+  try {
+    if (fs.existsSync(REFUNDS_FILE)) {
+      const raw = fs.readFileSync(REFUNDS_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn("Could not read durable refunds store:", err);
+  }
+  return [...INITIAL_REFUNDS];
+}
+
+function saveDurableRefunds(refunds: RefundRequest[]): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(REFUNDS_FILE, JSON.stringify(refunds, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to write durable refunds store:", err);
+  }
+}
+
+// Local in-memory store for fallback & caching (seeded from durable on-disk store)
 let memoryProducts: Product[] = [...INITIAL_PRODUCTS];
 let memoryOrders: Order[] = [...INITIAL_ORDERS];
 let memoryCustomers: Customer[] = [...INITIAL_CUSTOMERS];
-let memoryRefunds: RefundRequest[] = [...INITIAL_REFUNDS];
+let memoryRefunds: RefundRequest[] = loadDurableRefunds();
 let memoryInteractions: InteractionLog[] = [
   {
     interactionId: "INT-101",
@@ -479,39 +509,129 @@ export async function getCustomerByEmail(email: string): Promise<Customer | null
   return customers.find((c) => c.email.toLowerCase() === normalized) || null;
 }
 
-// In-memory Customer OTP store for verifiable customer identity verification
+// Production-grade Customer OTP & Verified Session store
 interface CustomerOtpRecord {
   orderId: string;
   email: string;
   otpCode: string;
   expiresAt: number;
+  failedAttempts: number;
+  lastRequestedAt: number;
 }
 const customerOtpStore = new Map<string, CustomerOtpRecord>();
 
-export function storeCustomerOtp(orderId: string, email: string, otpCode: string): void {
+// Verified session token store (tokens issued after OTP verification, valid for 15 minutes)
+interface CustomerSession {
+  orderId: string;
+  email: string;
+  expiresAt: number;
+}
+const verifiedCustomerSessions = new Map<string, CustomerSession>();
+
+export function storeCustomerOtp(orderId: string, email: string): {
+  success: boolean;
+  otpCode?: string;
+  message?: string;
+  cooldownSeconds?: number;
+} {
   const normalizedOrder = orderId.trim().toUpperCase();
+  const now = Date.now();
+  const existing = customerOtpStore.get(normalizedOrder);
+
+  // 60-second cooldown per order to prevent OTP spamming
+  if (existing && now - existing.lastRequestedAt < 60 * 1000) {
+    const cooldownSeconds = Math.ceil((60 * 1000 - (now - existing.lastRequestedAt)) / 1000);
+    return {
+      success: false,
+      cooldownSeconds,
+      message: `A verification code was recently generated. Please wait ${cooldownSeconds} seconds before requesting a new code.`,
+    };
+  }
+
+  // Cryptographically secure 6-digit OTP token
+  const otpCode = crypto.randomInt(100000, 1000000).toString();
+
   customerOtpStore.set(normalizedOrder, {
     orderId: normalizedOrder,
     email: email.trim().toLowerCase(),
-    otpCode: otpCode.trim(),
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes expiry
+    otpCode,
+    expiresAt: now + 10 * 60 * 1000, // 10 minutes expiry
+    failedAttempts: 0,
+    lastRequestedAt: now,
   });
+
+  return { success: true, otpCode };
 }
 
-export function verifyCustomerOtp(orderId: string, code: string): { verified: boolean; email?: string; message?: string } {
+export function verifyCustomerOtp(
+  orderId: string,
+  code: string
+): { verified: boolean; email?: string; sessionToken?: string; message?: string } {
   const normalizedOrder = orderId.trim().toUpperCase();
   const record = customerOtpStore.get(normalizedOrder);
+
   if (!record) {
-    return { verified: false, message: "No active verification code found for this order. Please request a verification code." };
+    return {
+      verified: false,
+      message: "No active verification code found for this order. Please request a new verification code.",
+    };
   }
+
   if (Date.now() > record.expiresAt) {
     customerOtpStore.delete(normalizedOrder);
-    return { verified: false, message: "Verification code has expired. Please request a new code." };
+    return {
+      verified: false,
+      message: "Verification code has expired. Please request a new code.",
+    };
   }
+
+  if (record.failedAttempts >= 3) {
+    customerOtpStore.delete(normalizedOrder);
+    return {
+      verified: false,
+      message: "Too many failed attempts. For your security, this code has been invalidated. Please request a new code.",
+    };
+  }
+
   if (record.otpCode !== code.trim()) {
-    return { verified: false, message: "Invalid verification code. Please check your email and try again." };
+    record.failedAttempts += 1;
+    const remaining = 3 - record.failedAttempts;
+    if (remaining <= 0) {
+      customerOtpStore.delete(normalizedOrder);
+      return {
+        verified: false,
+        message: "Too many failed attempts. This verification code has been invalidated. Please request a new code.",
+      };
+    }
+    return {
+      verified: false,
+      message: `Invalid verification code. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
+    };
   }
-  return { verified: true, email: record.email };
+
+  // One-time consumption: immediately remove the used OTP code
+  customerOtpStore.delete(normalizedOrder);
+
+  // Issue short-lived verified session token (valid for 15 minutes)
+  const sessionToken = crypto.randomBytes(24).toString("hex");
+  verifiedCustomerSessions.set(sessionToken, {
+    orderId: normalizedOrder,
+    email: record.email,
+    expiresAt: Date.now() + 15 * 60 * 1000,
+  });
+
+  return { verified: true, email: record.email, sessionToken };
+}
+
+export function isCustomerSessionValid(orderId: string, sessionToken?: string): boolean {
+  if (!sessionToken) return false;
+  const session = verifiedCustomerSessions.get(sessionToken);
+  if (!session) return false;
+  if (Date.now() > session.expiresAt) {
+    verifiedCustomerSessions.delete(sessionToken);
+    return false;
+  }
+  return session.orderId === orderId.trim().toUpperCase();
 }
 
 export async function getRefundRequests(): Promise<RefundRequest[]> {
@@ -573,6 +693,7 @@ export async function updateRefundEmailStatus(
   const index = memoryRefunds.findIndex((r) => r.refundId === refundId);
   if (index !== -1) {
     memoryRefunds[index].emailStatus = emailStatus;
+    saveDurableRefunds(memoryRefunds);
   }
 
   const client = getSheetsClient();
@@ -613,8 +734,11 @@ export async function createRefundRequest(refund: Omit<RefundRequest, "refundId"
     persistedToSheets: false,
   };
 
+  // 1. Immediately persist to durable on-disk outbox store
   memoryRefunds.unshift(newRefund);
+  saveDurableRefunds(memoryRefunds);
 
+  // 2. Attempt Google Sheets append
   const client = getSheetsClient();
   if (client) {
     try {
@@ -642,8 +766,9 @@ export async function createRefundRequest(refund: Omit<RefundRequest, "refundId"
       });
       persistedToSheets = true;
       newRefund.persistedToSheets = true;
+      saveDurableRefunds(memoryRefunds);
     } catch (err) {
-      console.error("Failed to append refund to Google Sheets:", err);
+      console.error("Failed to append refund to Google Sheets (preserved in durable outbox):", err);
     }
   }
 
@@ -667,6 +792,7 @@ export async function updateRefundStatus(
       memoryRefunds[index].eligibilityStatus = "Rejected";
     }
     updatedRefund = { ...memoryRefunds[index] };
+    saveDurableRefunds(memoryRefunds);
   }
 
   const client = getSheetsClient();
@@ -712,6 +838,7 @@ export async function updateRefundStatus(
         if (index === -1) {
           memoryRefunds.unshift(updatedRefund);
         }
+        saveDurableRefunds(memoryRefunds);
       }
     } catch (err: any) {
       console.error("Failed to update refund in Google Sheets:", err);

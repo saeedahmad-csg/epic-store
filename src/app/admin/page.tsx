@@ -73,9 +73,7 @@ export default function AdminPage() {
   }, []);
 
   function getAuthHeaders(): HeadersInit {
-    if (typeof window === "undefined") return {};
-    const savedKey = sessionStorage.getItem("apexstore_admin_key") || "";
-    return savedKey ? { "x-admin-key": savedKey } : {};
+    return {};
   }
 
   async function handleLogin(e: React.FormEvent) {
@@ -101,7 +99,6 @@ export default function AdminPage() {
       }
 
       sessionStorage.setItem("apexstore_admin_authenticated", "true");
-      sessionStorage.setItem("apexstore_admin_key", data.token || loginPassword.trim());
       setIsAuthenticated(true);
       await loadAdminData(false);
     } catch (err) {
@@ -111,7 +108,12 @@ export default function AdminPage() {
     }
   }
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    try {
+      await fetch("/api/admin/logout", { method: "POST" });
+    } catch (e) {
+      console.warn("Logout request failed:", e);
+    }
     if (typeof window !== "undefined") {
       sessionStorage.removeItem("apexstore_admin_authenticated");
       sessionStorage.removeItem("apexstore_admin_key");

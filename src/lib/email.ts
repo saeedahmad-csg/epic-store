@@ -1,4 +1,6 @@
 import nodemailer from "nodemailer";
+import * as fs from "fs";
+import * as path from "path";
 
 export interface SentEmailRecord {
   id: string;
@@ -13,11 +15,56 @@ export interface SentEmailRecord {
   transportInfo: string;
 }
 
-// In-memory log of dispatched emails for UI inspection
-export const emailDispatchLog: SentEmailRecord[] = [];
+const DATA_DIR = path.join(process.cwd(), "data");
+const EMAIL_STORE_FILE = path.join(DATA_DIR, "email_store.json");
 
-// Idempotency tracking to prevent duplicate confirmation emails
-const dispatchedRefundIds = new Set<string>();
+function loadDurableEmailStore(): { logs: SentEmailRecord[]; dispatchedIds: string[] } {
+  try {
+    if (fs.existsSync(EMAIL_STORE_FILE)) {
+      const raw = fs.readFileSync(EMAIL_STORE_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.logs)) {
+        return {
+          logs: parsed.logs,
+          dispatchedIds: Array.isArray(parsed.dispatchedIds) ? parsed.dispatchedIds : [],
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("Could not read durable email store:", err);
+  }
+  return { logs: [], dispatchedIds: [] };
+}
+
+const initialEmailData = loadDurableEmailStore();
+
+// In-memory log of dispatched emails for UI inspection (persisted to disk)
+export const emailDispatchLog: SentEmailRecord[] = initialEmailData.logs;
+
+// Idempotency tracking to prevent duplicate confirmation emails (persisted to disk)
+const dispatchedRefundIds = new Set<string>(initialEmailData.dispatchedIds);
+
+function saveDurableEmailStore(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(
+      EMAIL_STORE_FILE,
+      JSON.stringify(
+        {
+          logs: emailDispatchLog,
+          dispatchedIds: Array.from(dispatchedRefundIds),
+        },
+        null,
+        2
+      ),
+      "utf-8"
+    );
+  } catch (err) {
+    console.error("Failed to write durable email store:", err);
+  }
+}
 
 /**
  * Sanitizes user inputs to prevent HTML injection in emails
@@ -210,6 +257,7 @@ export async function sendRefundConfirmationEmail(params: {
 
       dispatchedRefundIds.add(params.refundId);
       emailDispatchLog.unshift(record);
+      saveDurableEmailStore();
       return { success: true, messageId: info.messageId, mode: "LIVE_SMTP", status: "SMTP_ACCEPTED" };
     } catch (err: any) {
       console.error("Live SMTP send failed:", err.message);
@@ -226,6 +274,7 @@ export async function sendRefundConfirmationEmail(params: {
         transportInfo: `SMTP Delivery Failed: ${err.message}`,
       };
       emailDispatchLog.unshift(failedRecord);
+      saveDurableEmailStore();
       return { success: false, mode: "SMTP_FAILED", status: "FAILED" };
     }
   }
@@ -246,6 +295,7 @@ export async function sendRefundConfirmationEmail(params: {
 
   dispatchedRefundIds.add(params.refundId);
   emailDispatchLog.unshift(record);
+  saveDurableEmailStore();
   console.log(`📧 Dispatched Refund Email [${record.id}] to ${record.recipient} for Refund ${params.refundId}`);
 
   return { success: true, messageId: emailId, mode: "LOCAL_DISPATCH_LOG", status: "TEST_DISPATCHED" };
@@ -330,6 +380,7 @@ export async function sendCustomerOtpEmail(params: {
         status: "SMTP_ACCEPTED",
         transportInfo: `Live SMTP (${host}) - OTP code sent`,
       });
+      saveDurableEmailStore();
       return { success: true, mode: "LIVE_SMTP" };
     } catch (err: any) {
       console.error("Live SMTP OTP send failed:", err.message);
@@ -348,6 +399,7 @@ export async function sendCustomerOtpEmail(params: {
     status: "TEST_DISPATCHED",
     transportInfo: `Demo OTP Dispatcher - Generated code: ${params.otpCode}`,
   });
+  saveDurableEmailStore();
   console.log(`🔑 Customer OTP for Order ${params.orderId} (${params.customerEmail}): [${params.otpCode}]`);
   return { success: true, mode: "LOCAL_DISPATCH_LOG" };
 }

@@ -11,8 +11,9 @@ import {
   updateRefundEmailStatus,
   storeCustomerOtp,
   verifyCustomerOtp,
+  isCustomerSessionValid,
 } from "./googleSheets";
-import { getCompanyPolicies, searchPolicyRAG } from "./policies";
+import { getCompanyPolicies, searchPolicyRAG, validatePolicyIntegrity } from "./policies";
 import { sendRefundConfirmationEmail, sendCustomerOtpEmail } from "./email";
 
 /**
@@ -86,6 +87,10 @@ const toolsDeclarations: any[] = [
           type: Type.STRING,
           description: "Optional: 6-digit one-time verification passcode sent to customer email.",
         },
+        sessionToken: {
+          type: Type.STRING,
+          description: "Optional: Active authenticated customer session token obtained from OTP verification.",
+        },
       },
     },
   },
@@ -128,15 +133,15 @@ const toolsDeclarations: any[] = [
         },
         customerEmail: {
           type: Type.STRING,
-          description: "Customer's email address associated with the order for identity verification.",
-        },
-        cardLast4: {
-          type: Type.STRING,
-          description: "Optional: Last 4 digits of the payment card used at checkout for verification.",
+          description: "Customer's email address associated with the order.",
         },
         otpCode: {
           type: Type.STRING,
           description: "Optional: 6-digit one-time verification passcode sent to customer email.",
+        },
+        sessionToken: {
+          type: Type.STRING,
+          description: "Optional: Active authenticated customer session token obtained from OTP verification.",
         },
         reason: {
           type: Type.STRING,
@@ -167,6 +172,9 @@ function redactToolArgs(args: any): any {
   }
   if (sanitized.otpCode) {
     sanitized.otpCode = "******";
+  }
+  if (sanitized.sessionToken) {
+    sanitized.sessionToken = "******";
   }
   if (sanitized.customerQuery && sanitized.customerQuery.includes("@")) {
     const parts = sanitized.customerQuery.split("@");
@@ -208,21 +216,35 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     if (!order) {
       return { success: false, message: `Order #${args.orderId} does not exist in our store records.` };
     }
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    storeCustomerOtp(order.orderId, order.customerEmail, otpCode);
-    await sendCustomerOtpEmail({
+    const otpRes = storeCustomerOtp(order.orderId, order.customerEmail);
+    if (!otpRes.success || !otpRes.otpCode) {
+      return {
+        success: false,
+        message: otpRes.message || "A verification code was recently generated. Please wait before requesting another.",
+        cooldownSeconds: otpRes.cooldownSeconds,
+      };
+    }
+
+    const emailSendRes = await sendCustomerOtpEmail({
       customerEmail: order.customerEmail,
       customerName: order.customerName,
       orderId: order.orderId,
-      otpCode,
+      otpCode: otpRes.otpCode,
     });
+
     const emailParts = order.customerEmail.split("@");
     const maskedEmail = emailParts.length === 2 ? `${emailParts[0].slice(0, 2)}***@${emailParts[1]}` : "***";
+    const modeNotice =
+      emailSendRes.mode === "LIVE_SMTP"
+        ? `Live verification email sent to ${maskedEmail}.`
+        : `Verification code generated for ${maskedEmail} (In-App Dispatch Viewer mode).`;
+
     return {
       success: true,
-      message: `A 6-digit verification code has been dispatched to ${maskedEmail}. Please provide this code to authenticate your session.`,
+      message: `${modeNotice} Please provide the 6-digit code to complete verification.`,
       maskedEmail,
       orderId: order.orderId,
+      deliveryMode: emailSendRes.mode,
     };
   }
 
@@ -233,40 +255,55 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         return { found: false, message: `Order #${args.orderId} not found in our store records.` };
       }
       const customer = await getCustomerByEmail(order.customerEmail);
-      const cardLast4 = extractCardLast4(order.paymentMethod);
       const sanitizedPayment = sanitizePaymentMethod(order.paymentMethod);
 
       // Server-side identity verification:
-      // A request is ONLY verified if the caller provides matching credentials:
-      // 1. Valid OTP code dispatched to the registered customer email, OR
-      // 2. Provided cardLast4 matches the order's actual payment card digits, OR
-      // 3. Provided customerEmail matches the order's registered customerEmail.
-      const providedEmail = (args.customerEmail || "").trim().toLowerCase();
-      const providedCardLast4 = (args.cardLast4 || "").trim();
+      // A request is ONLY verified if the caller provides a valid OTP or active verified session token.
+      // Knowing the checkout email or card suffix does NOT count as proof of identity.
       const providedOtp = (args.otpCode || "").trim();
+      const providedSessionToken = (args.sessionToken || "").trim();
 
       const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
-      const emailMatches = Boolean(providedEmail && providedEmail === order.customerEmail.toLowerCase());
-      const cardMatches = Boolean(providedCardLast4 && cardLast4 && providedCardLast4 === cardLast4);
-      const isVerified = otpResult.verified || emailMatches || cardMatches;
+      const sessionValid = isCustomerSessionValid(order.orderId, providedSessionToken);
+      const isVerified = otpResult.verified || sessionValid;
+
+      if (!isVerified) {
+        return {
+          found: true,
+          requiresVerification: true,
+          verificationPrompt:
+            "Order located. For customer security and privacy, sensitive order details are protected until you verify with an OTP code sent to your registered checkout email.",
+          order: {
+            orderId: order.orderId,
+            orderStatus: "Order Located (OTP verification required)",
+            productName: "Protected (OTP verification required)",
+            quantity: 0,
+            deliveryDate: "Protected",
+            customerName: "Protected",
+            customerEmail: "Protected",
+            totalAmount: "Protected",
+            paymentMethod: "Protected",
+            customerTier: "Protected",
+            requiresVerification: true,
+          },
+        };
+      }
 
       return {
         found: true,
+        sessionToken: otpResult.sessionToken || providedSessionToken,
         order: {
           orderId: order.orderId,
           orderStatus: order.orderStatus,
-          productName: isVerified ? order.productName : "Protected (Verification required)",
-          quantity: isVerified ? order.quantity : 0,
-          deliveryDate: isVerified ? order.deliveryDate : "Protected (Verification required)",
-          customerName: isVerified ? order.customerName : `${order.customerName.split(" ")[0]}***`,
-          customerEmail: isVerified ? order.customerEmail : "Protected (Verification required)",
-          totalAmount: isVerified ? `$${order.totalAmount.toFixed(2)}` : "Protected (Verification required)",
-          paymentMethod: isVerified ? sanitizedPayment : "Protected",
-          customerTier: isVerified ? (customer?.loyaltyTier || "Bronze") : "Protected",
-          requiresVerification: !isVerified,
-          verificationPrompt: !isVerified
-            ? "Order located. For customer privacy, product details and delivery contents are protected until you verify with registered email, last 4 card digits, or OTP code."
-            : undefined,
+          productName: order.productName,
+          quantity: order.quantity,
+          deliveryDate: order.deliveryDate,
+          customerName: order.customerName,
+          customerEmail: order.customerEmail,
+          totalAmount: `$${order.totalAmount.toFixed(2)}`,
+          paymentMethod: sanitizedPayment,
+          customerTier: customer?.loyaltyTier || "Bronze",
+          requiresVerification: false,
         },
       };
     } else if (args.customerQuery) {
@@ -280,12 +317,13 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         requiresVerification: true,
         orders: orders.map((o) => ({
           orderId: o.orderId,
-          orderStatus: o.orderStatus,
-          productName: "Protected (Verification required)",
+          orderStatus: "Order Located (OTP verification required)",
+          productName: "Protected (OTP verification required)",
           deliveryDate: "Protected",
-          customerName: `${o.customerName.split(" ")[0]}***`,
+          customerName: "Protected",
         })),
-        verificationPrompt: "Account located. Please verify checkout email, last 4 card digits, or OTP verification code to access full order details.",
+        verificationPrompt:
+          "Account located. For customer privacy, please request a verification code (OTP) for your Order ID to access order contents.",
       };
     } else {
       return { found: false, message: "Please provide either an orderId (e.g. ORD-1001) or a customer name/email." };
@@ -327,36 +365,38 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
     // Server-Side Authorization: Customer identity and tier are bound strictly to order.customerEmail from database
     const customer = await getCustomerByEmail(order.customerEmail);
 
-    // Verify ownership: customer must supply matching OTP code OR matching checkout email OR matching last 4 card digits
-    const cardLast4 = extractCardLast4(order.paymentMethod);
-    const providedEmail = (args.customerEmail || "").trim().toLowerCase();
-    const providedCardLast4 = (args.cardLast4 || "").trim();
+    // Verify ownership: customer MUST verify via OTP or active authenticated customer session
     const providedOtp = (args.otpCode || "").trim();
+    const providedSessionToken = (args.sessionToken || "").trim();
 
     const otpResult = providedOtp ? verifyCustomerOtp(order.orderId, providedOtp) : { verified: false };
-    const emailMatches = Boolean(providedEmail && providedEmail === order.customerEmail.toLowerCase());
-    const cardMatches = Boolean(providedCardLast4 && cardLast4 && providedCardLast4 === cardLast4);
+    const sessionValid = isCustomerSessionValid(order.orderId, providedSessionToken);
 
-    if (!otpResult.verified && !emailMatches && !cardMatches) {
+    if (!otpResult.verified && !sessionValid) {
       return {
         success: false,
         isEligible: false,
-        message: `Security Authorization Failed: Verification required. The provided credentials do not match Order #${order.orderId}. Please provide the registered checkout email, last 4 card digits, or request an OTP verification code.`,
+        message: `Security Authorization Failed: Verification required. A 6-digit one-time passcode (OTP) must be verified before processing a refund for Order #${order.orderId}. Please request a verification code to authenticate.`,
       };
     }
 
-    // Load live Word (.docx) policies dynamically
+    // Load live Word (.docx) policies dynamically and validate policy structure integrity
     const { clauses } = await getCompanyPolicies();
+    const integrity = validatePolicyIntegrity(clauses || []);
 
-    // Safe fallback: If required policy clauses cannot be loaded, send for manual review rather than making an automated decision
-    if (!clauses || clauses.length === 0) {
+    // Safe fallback: If policy clauses are missing or fail integrity validation, route to manual admin review
+    if (!clauses || clauses.length === 0 || !integrity.valid) {
+      const missingReason = !integrity.valid
+        ? `Official policy document is missing required sections: ${integrity.missingClauses.join(", ")}.`
+        : "Official policy clauses are unavailable.";
+
       const savedRefund = await createRefundRequest({
         orderId: order.orderId,
         customerEmail: order.customerEmail,
         productId: order.productId,
         refundAmount: order.totalAmount,
         reason: args.reason,
-        policyCitation: "[Manual Review Required] Official policy clauses are unavailable for automated decisioning. Forwarded to administrator for review.",
+        policyCitation: `[Manual Review Required] ${missingReason} Forwarded to administrator for review.`,
         eligibilityStatus: "Pending_Admin_Review",
         adminStatus: "PENDING",
       });
@@ -366,7 +406,7 @@ async function executeTool(name: string, args: any, sessionEmail?: string): Prom
         refundId: savedRefund.refundId,
         isEligible: true,
         refundAmount: order.totalAmount,
-        policyCitation: "[Manual Review Required] Policy clauses unavailable; routed to manual admin review.",
+        policyCitation: `[Manual Review Required] ${missingReason} Routed to manual admin review.`,
         adminStatus: "PENDING",
         eligibilityStatus: "Pending_Admin_Review",
         persistedToSheets: savedRefund.persistedToSheets,

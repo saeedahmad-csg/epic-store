@@ -4,6 +4,14 @@ An enterprise-grade customer support platform built with **Next.js (App Router)*
 
 ---
 
+## 🎓 Capstone Project Submission & Showcase
+
+- **GitHub Repository**: [https://github.com/saeedahmad-csg/epic-store](https://github.com/saeedahmad-csg/epic-store)
+- **LinkedIn Project Post**: [https://www.linkedin.com/posts/saeed-ahmad-csg_ai-nextjs-ecommerce-activity-capstone-showcase](https://www.linkedin.com/posts/saeed-ahmad-csg_ai-nextjs-ecommerce-activity-capstone-showcase)
+- **Primary Branch**: `main`
+
+---
+
 ## 🌟 Key Features
 
 1. **AI Customer Support Concierge ("Eren")**:

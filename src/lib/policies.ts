@@ -347,3 +347,38 @@ export async function updatePolicyDocument(buffer: Buffer): Promise<{ success: b
     return { success: false, error: err.message || "Failed to update policy" };
   }
 }
+
+/**
+ * Validates that all required core policy clauses are present in the parsed Word document.
+ * If any core clause is missing, automated refund decisioning must safely yield to manual admin review.
+ */
+export function validatePolicyIntegrity(clauses: PolicyClause[]): {
+  valid: boolean;
+  missingClauses: string[];
+} {
+  const REQUIRED_SECTIONS = [
+    "SEC-1",
+    "SEC-2.1",
+    "SEC-2.2",
+    "SEC-2.3",
+    "SEC-2.4",
+    "SEC-3.1",
+    "SEC-3.2",
+    "SEC-3.3",
+    "SEC-3.4",
+    "SEC-4.1",
+    "SEC-4.2",
+  ];
+
+  if (!clauses || clauses.length === 0) {
+    return { valid: false, missingClauses: REQUIRED_SECTIONS };
+  }
+
+  const present = new Set(clauses.map((c) => c.sectionId));
+  const missing = REQUIRED_SECTIONS.filter((sec) => !present.has(sec));
+
+  return {
+    valid: missing.length === 0,
+    missingClauses: missing,
+  };
+}

@@ -39,15 +39,18 @@
 | `POST` | `/api/refunds` | [`src/app/api/refunds/route.ts#L26-L135`](file:///d:/Projects/15-Agent/src/app/api/refunds/route.ts#L26-L135) | `POST(req)` | Administrative endpoint to `APPROVE`, `REJECT`, or safely retry failed confirmation emails (`RETRY_EMAIL`). |
 | `GET` | `/api/orders` | [`src/app/api/orders/route.ts#L4-L30`](file:///d:/Projects/15-Agent/src/app/api/orders/route.ts#L4-L30) | `GET(req)` | Fetches a specific order by `?orderId=...` or list of orders matching `?email=...`. |
 | `GET` | `/api/products` | [`src/app/api/products/route.ts#L4-L15`](file:///d:/Projects/15-Agent/src/app/api/products/route.ts#L4-L15) | `GET(req)` | Queries the live product catalog by `?query=...` and/or `?category=...`. |
-| `POST` | `/api/admin/login` | [`src/app/api/admin/login/route.ts#L22-L85`](file:///d:/Projects/15-Agent/src/app/api/admin/login/route.ts#L22-L85) | `POST(req)` | Authenticates administrator credentials against environment variables with 5 attempts/min sliding-window rate limiting. |
+| `POST` | `/api/admin/login` | [`src/app/api/admin/login/route.ts#L22-L105`](file:///d:/Projects/15-Agent/src/app/api/admin/login/route.ts#L22-L105) | `POST(req)` | Authenticates administrator credentials and issues an HttpOnly SameSite secure session cookie. |
+| `POST` | `/api/admin/logout` | [`src/app/api/admin/logout/route.ts#L4-L12`](file:///d:/Projects/15-Agent/src/app/api/admin/logout/route.ts#L4-L12) | `POST()` | Clears the administrative session cookie. |
 
 ---
 
 ## 3. Services & Business Logic
 
 ### `src/lib/adminAuth.ts`
-- [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L8-L40)
-  - **Purpose**: Authenticates administrative requests against `ADMIN_SECRET_KEY` strictly via the `x-admin-key` header. Query-string parameter `?adminKey=` is rejected to prevent credential leakage. Fails closed with 401 Unauthorized if `ADMIN_SECRET_KEY` is missing or invalid.
+- [`requireAdminKey(req: NextRequest): NextResponse | null`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L50-L95)
+  - **Purpose**: Authenticates administrative requests via secure signed `apex_admin_session` cookie (or fallback `x-admin-key` header for CLI). Master `ADMIN_SECRET_KEY` is never transmitted to the browser.
+- [`createAdminSessionToken(): string`](file:///d:/Projects/15-Agent/src/lib/adminAuth.ts#L13-L20)
+  - **Purpose**: Issues a cryptographically signed HMAC-SHA256 session token with a 24-hour expiry.
 
 ### `src/lib/gemini.ts`
 - [`sanitizePaymentMethod(method?: string): string`](file:///d:/Projects/15-Agent/src/lib/gemini.ts#L18-L24)

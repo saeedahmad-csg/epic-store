@@ -23,14 +23,23 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "REQUEST_OTP") {
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      storeCustomerOtp(order.orderId, order.customerEmail, otpCode);
+      const otpRes = storeCustomerOtp(order.orderId, order.customerEmail);
+
+      if (!otpRes.success || !otpRes.otpCode) {
+        return NextResponse.json(
+          {
+            error: otpRes.message || "Please wait before requesting another verification code.",
+            cooldownSeconds: otpRes.cooldownSeconds,
+          },
+          { status: 429 }
+        );
+      }
 
       await sendCustomerOtpEmail({
         customerEmail: order.customerEmail,
         customerName: order.customerName,
         orderId: order.orderId,
-        otpCode,
+        otpCode: otpRes.otpCode,
       });
 
       const parts = order.customerEmail.split("@");
@@ -65,6 +74,7 @@ export async function POST(req: NextRequest) {
         verified: true,
         orderId: order.orderId,
         email: result.email,
+        sessionToken: result.sessionToken,
         message: "Customer identity verified successfully.",
       });
     }

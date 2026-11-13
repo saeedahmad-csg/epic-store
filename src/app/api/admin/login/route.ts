@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createAdminSessionToken, ADMIN_COOKIE_NAME } from "@/lib/adminAuth";
 
 // In-memory sliding-window rate limiter for administrative login attempts
 const loginAttempts = new Map<string, number[]>();
@@ -52,7 +53,6 @@ export async function POST(req: NextRequest) {
 
     const envEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
     const envPassword = process.env.ADMIN_PASSWORD?.trim();
-    const envSecretKey = (process.env.ADMIN_SECRET_KEY || envPassword)?.trim();
 
     if (!envEmail || !envPassword) {
       return NextResponse.json(
@@ -75,11 +75,25 @@ export async function POST(req: NextRequest) {
     // Reset rate limiter on successful authentication
     loginAttempts.delete(clientIp);
 
-    return NextResponse.json({
+    // Issue secure session token and set as HttpOnly cookie (master secret is NEVER sent to browser)
+    const sessionToken = createAdminSessionToken();
+
+    const response = NextResponse.json({
       success: true,
       message: "Authenticated successfully.",
-      token: envSecretKey,
     });
+
+    response.cookies.set({
+      name: ADMIN_COOKIE_NAME,
+      value: sessionToken,
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 24 * 60 * 60, // 24 hours
+    });
+
+    return response;
   } catch (err: any) {
     console.error("Error in /api/admin/login:", err);
     return NextResponse.json(
